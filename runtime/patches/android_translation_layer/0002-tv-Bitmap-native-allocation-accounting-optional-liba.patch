@@ -1,0 +1,105 @@
+From 9e7fa5d8afe44d356532d43156f26e1944695340 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 16:04:37 +0530
+Subject: [PATCH 02/42] tv: Bitmap native-allocation accounting + optional
+ libatlbmpfix decoder (bounds/sampled JPEG/WebP/PNG decode)
+
+---
+ src/api-impl/android/graphics/Bitmap.java     | 35 ++++++++++++++++++-
+ .../android/graphics/BitmapFactory.java       |  9 +++++
+ 2 files changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/src/api-impl/android/graphics/Bitmap.java b/src/api-impl/android/graphics/Bitmap.java
+index 436095b2..110b5526 100644
+--- a/src/api-impl/android/graphics/Bitmap.java
++++ b/src/api-impl/android/graphics/Bitmap.java
+@@ -5,6 +5,8 @@ import android.util.DisplayMetrics;
+ import java.io.IOException;
+ import java.io.OutputStream;
+ import java.nio.Buffer;
++import java.util.concurrent.atomic.AtomicLong;
++import dalvik.system.VMRuntime;
+ 
+ /*
+  * Bitmap is implemented as GdkTexture or GtkSnapshot. It can only be one of the two at a time.
+@@ -50,6 +52,35 @@ public final class Bitmap implements Parcelable {
+ 	private boolean recycled = false;
+ 	boolean mutable = true;
+ 
++	// --- native memory accounting (see armhf/patches/bitmap-native-accounting.py) ---
++	private static final long NATIVE_CAP = 192L * 1024 * 1024; // live bitmap bytes before we force a GC
++	private static final AtomicLong liveNative = new AtomicLong();
++	private static volatile long lastForcedGc = 0;
++	private long accounted = 0;
++
++	private void accountNative() {
++		long n = (long) height * stride;
++		if (n <= 0) return;
++		accounted = n;
++		VMRuntime.getRuntime().registerNativeAllocation(n);
++		if (liveNative.addAndGet(n) > NATIVE_CAP) {
++			long now = System.nanoTime();
++			if (now - lastForcedGc > 300_000_000L) { // at most ~3x/s
++				lastForcedGc = now;
++				Runtime.getRuntime().gc();
++				System.runFinalization();
++			}
++		}
++	}
++
++	private void unaccountNative() {
++		long n = accounted;
++		if (n == 0) return;
++		accounted = 0;
++		liveNative.addAndGet(-n);
++		VMRuntime.getRuntime().registerNativeFree(n);
++	}
++
+ 	Bitmap(long texture) {
+ 		this(native_get_width(texture), native_get_height(texture), Config.ARGB_8888);
+ 		this.texture = texture;
+@@ -61,6 +92,7 @@ public final class Bitmap implements Parcelable {
+ 		this.height = height;
+ 		int stride = width * config.bytes_per_pixel;
+ 		this.stride = (stride + 3) & ~3; // 4-byte alignment
++		accountNative();
+ 	}
+ 
+ 	public static Bitmap createBitmap(int width, int height, Config config) {
+@@ -145,11 +177,12 @@ public final class Bitmap implements Parcelable {
+ 		}
+ 	}
+ 
+-	public void recycle() {
++	public synchronized void recycle() {
+ 		native_recycle(texture, snapshot);
+ 		texture = 0;
+ 		snapshot = 0;
+ 		recycled = true;
++		unaccountNative();
+ 	}
+ 
+ 	public int getRowBytes() {
+diff --git a/src/api-impl/android/graphics/BitmapFactory.java b/src/api-impl/android/graphics/BitmapFactory.java
+index ca354aed..e56972aa 100644
+--- a/src/api-impl/android/graphics/BitmapFactory.java
++++ b/src/api-impl/android/graphics/BitmapFactory.java
+@@ -35,6 +35,15 @@ import java.io.InputStream;
+ public class BitmapFactory {
+ 	private static final int DECODE_BUFFER_SIZE = 16 * 1024;
+ 
++	static {
++		// libatlbmpfix.so replaces nativeDecodeStream with a decoder that honours inJustDecodeBounds/inSampleSize
++		try {
++			System.loadLibrary("atlbmpfix");
++		} catch (Throwable t) {
++			// not installed: stock (full-size) decoder stays in place
++		}
++	}
++
+ 	public static class Options {
+ 		/**
+ 		 * Create a default Options object, which if left unchanged will give
+-- 
+2.43.0
+

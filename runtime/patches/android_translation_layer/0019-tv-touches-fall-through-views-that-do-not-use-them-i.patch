@@ -1,0 +1,243 @@
+From 614d0e8c6dda224f097f7aff756285e7823b2b30 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 23:24:26 +0530
+Subject: [PATCH 19/42] tv: touches fall through views that do not use them
+ (inert views are not pick targets; custom-dispatch views like Compose that
+ decline a hover/DOWN become transparent there), inline dialog outside-touch
+ by bounds - CloudStream TV layout had full-screen overlays, nothing was
+ clickable
+
+---
+ src/api-impl-jni/app/android_app_Dialog.c     |  4 +-
+ src/api-impl-jni/views/android_view_View.c    | 39 +++++++++++++---
+ .../views/android_view_ViewGroup.c            |  2 +
+ src/api-impl-jni/widgets/WrapperWidget.c      | 44 +++++++++++++++++++
+ src/api-impl-jni/widgets/WrapperWidget.h      |  4 ++
+ 5 files changed, 85 insertions(+), 8 deletions(-)
+
+diff --git a/src/api-impl-jni/app/android_app_Dialog.c b/src/api-impl-jni/app/android_app_Dialog.c
+index 6512d328..30e80b51 100644
+--- a/src/api-impl-jni/app/android_app_Dialog.c
++++ b/src/api-impl-jni/app/android_app_Dialog.c
+@@ -37,8 +37,8 @@ static void on_scrim_pressed(GtkGestureClick *g, int n, double x, double y, GtkW
+ {
+ 	GtkWidget *scrim = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+ 	GtkWidget *card = g_object_get_data(G_OBJECT(dialog), "atl-inline-card");
+-	GtkWidget *hit = gtk_widget_pick(scrim, x, y, GTK_PICK_DEFAULT);
+-	if (hit && card && (hit == card || gtk_widget_is_ancestor(hit, card)))
++	graphene_rect_t b;
++	if (card && gtk_widget_compute_bounds(card, scrim, &b) && graphene_rect_contains_point(&b, &GRAPHENE_POINT_INIT(x, y)))
+ 		return;
+ 	if (!GPOINTER_TO_INT(g_object_get_data(G_OBJECT(dialog), "atl-cancel-outside")))
+ 		return;
+diff --git a/src/api-impl-jni/views/android_view_View.c b/src/api-impl-jni/views/android_view_View.c
+index 9f1c013b..79282886 100644
+--- a/src/api-impl-jni/views/android_view_View.c
++++ b/src/api-impl-jni/views/android_view_View.c
+@@ -136,13 +136,25 @@ static bool call_ontouch_callback(WrapperWidget *wrapper, int action, struct poi
+ 	return ret;
+ }
+ 
+-static void call_hover_callback(jobject this, int action, float x, float y, float raw_x, float raw_y)
++static gboolean call_hover_callback(jobject this, int action, float x, float y, float raw_x, float raw_y)
+ {
+ 	JNIEnv *env = get_jni_env();
+ 	jobject motion_event = (*env)->NewObject(env, handle_cache.motion_event.class, handle_cache.motion_event.constructor_single, SOURCE_CLASS_POINTER, action, 0, x, y, x, y);
+-	(*env)->CallBooleanMethod(env, this, handle_cache.view.dispatchHoverEvent, motion_event);
++	jboolean ret = (*env)->CallBooleanMethod(env, this, handle_cache.view.dispatchHoverEvent, motion_event);
+ 	if ((*env)->ExceptionCheck(env))
+ 		(*env)->ExceptionDescribe(env);
++	(*env)->DeleteLocalRef(env, motion_event);
++	return ret;
++}
++
++static void hover_result(WrapperWidget *wrapper, gboolean taken, double x, double y)
++{
++	if (!wrapper->custom_dispatch_touch)
++		return;
++	if (taken)
++		wrapper->touch_declined = FALSE;
++	else
++		atl_touch_declined(wrapper, x, y);
+ }
+ 
+ static void transform_coords_to_widget_relative(GtkWidget *widget, double *x, double *y)
+@@ -259,6 +271,8 @@ static gboolean on_pointer_event(GtkEventControllerLegacy *event_controller, Gdk
+ 	}
+ 
+ 	gboolean ret = call_ontouch_callback(wrapper, action, pointers, pointer_indices, phase, timestamp, event);
++	if (!ret && action == ACTION_DOWN && phase == GTK_PHASE_BUBBLE && wrapper->custom_dispatch_touch)
++		atl_touch_declined(wrapper, x, y);
+ 	if (event_type == GDK_BUTTON_RELEASE || event_type == GDK_TOUCH_END) {
+ 		remove_pointer_fast(pointer_indices, &pointers[id]);
+ 	}
+@@ -367,11 +381,13 @@ static void hover_enter_cb(GtkEventControllerMotion *controller, double x, doubl
+ 	double raw_x;
+ 	double raw_y;
+ 	GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
+-	gdk_event_get_position(event, &raw_x, &raw_y);
++	raw_x = x, raw_y = y;
++	if (event)
++		gdk_event_get_position(event, &raw_x, &raw_y);
+ 	wrapper->hover_exit_pending = FALSE;
+ 	wrapper->hover_x = x;
+ 	wrapper->hover_y = y;
+-	call_hover_callback(wrapper->jobj, ACTION_HOVER_ENTER, x, y, raw_x, raw_y);
++	hover_result(wrapper, call_hover_callback(wrapper->jobj, ACTION_HOVER_ENTER, x, y, raw_x, raw_y), x, y);
+ }
+ 
+ static void hover_leave_cb(GtkEventControllerMotion *controller, WrapperWidget *wrapper)
+@@ -387,10 +403,12 @@ static void hover_motion_cb(GtkEventControllerMotion *controller, double x, doub
+ 	double raw_x;
+ 	double raw_y;
+ 	GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
+-	gdk_event_get_position(event, &raw_x, &raw_y);
++	raw_x = x, raw_y = y;
++	if (event)
++		gdk_event_get_position(event, &raw_x, &raw_y);
+ 	wrapper->hover_x = x;
+ 	wrapper->hover_y = y;
+-	call_hover_callback(wrapper->jobj, ACTION_HOVER_MOVE, x, y, raw_x, raw_y);
++	hover_result(wrapper, call_hover_callback(wrapper->jobj, ACTION_HOVER_MOVE, x, y, raw_x, raw_y), x, y);
+ }
+ 
+ void _setOnTouchListener(JNIEnv *env, jobject this, GtkWidget *widget)
+@@ -615,9 +633,16 @@ static void java_widget_dispose(GObject *java_widget)
+ 	}
+ }
+ static void java_widget_init(JavaWidget *java_widget) {}
++static gboolean java_widget_contains(GtkWidget *widget, double x, double y)
++{
++	if (!atl_widget_takes_pointer(widget))
++		return FALSE;
++	return GTK_WIDGET_CLASS(g_type_class_peek(GTK_TYPE_WIDGET))->contains(widget, x, y);
++}
+ static void java_widget_class_init(JavaWidgetClass *class)
+ {
+ 	G_OBJECT_CLASS(class)->dispose = java_widget_dispose;
++	GTK_WIDGET_CLASS(class)->contains = java_widget_contains;
+ }
+ G_DEFINE_TYPE(JavaWidget, java_widget, GTK_TYPE_WIDGET)
+ 
+@@ -642,6 +667,7 @@ JNIEXPORT jlong JNICALL Java_android_view_View_native_1constructor(JNIEnv *env,
+ 
+ 		g_signal_connect(controller, "scroll", G_CALLBACK(scroll_cb), wrapper->jobj);
+ 		gtk_widget_add_controller(GTK_WIDGET(wrapper), controller);
++		g_object_set_data(G_OBJECT(wrapper), "atl_pointer_target", GINT_TO_POINTER(1));
+ 	}
+ 	if (_METHOD(class, "dispatchHoverEvent", "(Landroid/view/MotionEvent;)Z") != handle_cache.view.dispatchHoverEvent) {
+ 		GtkEventController *controller = gtk_event_controller_motion_new();
+@@ -659,6 +685,7 @@ JNIEXPORT void JNICALL Java_android_view_View_nativeInvalidate(JNIEnv *env, jcla
+ {
+ 	GtkWidget *widget = GTK_WIDGET(_PTR(widget_ptr));
+ 
++	WRAPPER_WIDGET(gtk_widget_get_parent(widget))->touch_declined = FALSE;
+ 	wrapper_widget_queue_draw(WRAPPER_WIDGET(gtk_widget_get_parent(widget)));
+ }
+ 
+diff --git a/src/api-impl-jni/views/android_view_ViewGroup.c b/src/api-impl-jni/views/android_view_ViewGroup.c
+index 368a0169..8532e8a0 100644
+--- a/src/api-impl-jni/views/android_view_ViewGroup.c
++++ b/src/api-impl-jni/views/android_view_ViewGroup.c
+@@ -175,6 +175,8 @@ JNIEXPORT jboolean JNICALL Java_android_view_ViewGroup_native_1dispatchTouchEven
+ {
+ 	GtkWidget *widget = GTK_WIDGET(_PTR(widget_ptr));
+ 	GtkWidget *picked_child = gtk_widget_pick(widget, x, y, GTK_PICK_DEFAULT);
++	if (!picked_child)  /* only inert (transparent) views at this point: offer it to this view group */
++		picked_child = widget;
+ 
+ 	return atl_propagate_synthetic_motionevent(picked_child, motion_event, widget);
+ }
+diff --git a/src/api-impl-jni/widgets/WrapperWidget.c b/src/api-impl-jni/widgets/WrapperWidget.c
+index 7e6c5428..1711f785 100644
+--- a/src/api-impl-jni/widgets/WrapperWidget.c
++++ b/src/api-impl-jni/widgets/WrapperWidget.c
+@@ -210,6 +210,48 @@ static void wrapper_widget_snapshot(GtkWidget *widget, GdkSnapshot *snapshot)
+ 	snapshot_in_progress--;
+ }
+ 
++/* ATL: does this widget handle pointer input itself? (controllers added by ATL carry these keys) */
++gboolean atl_widget_takes_pointer(GtkWidget *widget)
++{
++	return g_object_get_data(G_OBJECT(widget), "on_touch_listener") || g_object_get_data(G_OBJECT(widget), "on_click_listener")
++	    || g_object_get_data(G_OBJECT(widget), "on_long_click_listener") || g_object_get_data(G_OBJECT(widget), "atl_pointer_target");
++}
++
++#define DECLINE_RADIUS 24
++static gboolean wrapper_widget_contains(GtkWidget *widget, double x, double y)
++{
++	WrapperWidget *wrapper = WRAPPER_WIDGET(widget);
++	if (wrapper->touch_declined && x > wrapper->declined_x - DECLINE_RADIUS && x < wrapper->declined_x + DECLINE_RADIUS
++	    && y > wrapper->declined_y - DECLINE_RADIUS && y < wrapper->declined_y + DECLINE_RADIUS)
++		return FALSE;
++	if (!atl_widget_takes_pointer(widget))
++		return FALSE;  /* inert view: let the pick fall through to siblings underneath, like Android */
++	return GTK_WIDGET_CLASS(wrapper_widget_parent_class)->contains(widget, x, y);
++}
++
++/* a custom-dispatch view (e.g. Compose) did not take a hover/DOWN at (x, y) (wrapper coords): if some other view
++ * underneath would be picked there, make this one transparent around the point so that view gets the click */
++void atl_touch_declined(WrapperWidget *wrapper, double x, double y)
++{
++	GtkWidget *w = GTK_WIDGET(wrapper);
++	GtkWidget *root = GTK_WIDGET(gtk_widget_get_root(w));
++	graphene_point_t p;
++	if (!root || !gtk_widget_compute_point(w, root, &GRAPHENE_POINT_INIT(x, y), &p))
++		return;
++	gboolean was = wrapper->touch_declined;
++	double ox = wrapper->declined_x, oy = wrapper->declined_y;
++	wrapper->touch_declined = TRUE;
++	wrapper->declined_x = x;
++	wrapper->declined_y = y;
++	GtkWidget *hit = gtk_widget_pick(root, p.x, p.y, GTK_PICK_DEFAULT);
++	gboolean other = hit && hit != w && !gtk_widget_is_ancestor(hit, w) && !gtk_widget_is_ancestor(w, hit);
++	if (!other) {  /* nothing else would take it: keep the view as the target (and the old decline, if any) */
++		wrapper->touch_declined = was;
++		wrapper->declined_x = ox;
++		wrapper->declined_y = oy;
++	}
++}
++
+ static void wrapper_widget_class_init(WrapperWidgetClass *class)
+ {
+ 	GObjectClass *object_class = G_OBJECT_CLASS(class);
+@@ -221,6 +263,7 @@ static void wrapper_widget_class_init(WrapperWidgetClass *class)
+ 	widget_class->measure = wrapper_widget_measure;
+ 	widget_class->size_allocate = wrapper_widget_allocate;
+ 	widget_class->snapshot = wrapper_widget_snapshot;
++	widget_class->contains = wrapper_widget_contains;
+ 
+ 	object_class->set_property = wrapper_widget_set_property;
+ 	object_class->get_property = wrapper_widget_get_property;
+@@ -552,6 +595,7 @@ void wrapper_widget_set_jobject(WrapperWidget *wrapper, JNIEnv *env, jobject job
+ 
+ 		g_signal_connect(controller, "released", G_CALLBACK(on_click), wrapper->jobj);
+ 		gtk_widget_add_controller(GTK_WIDGET(wrapper), controller);
++		g_object_set_data(G_OBJECT(wrapper), "atl_pointer_target", GINT_TO_POINTER(1));
+ 		widget_set_needs_allocation(wrapper->child);
+ 	}
+ 
+diff --git a/src/api-impl-jni/widgets/WrapperWidget.h b/src/api-impl-jni/widgets/WrapperWidget.h
+index 18cd2b2e..3ea747e4 100644
+--- a/src/api-impl-jni/widgets/WrapperWidget.h
++++ b/src/api-impl-jni/widgets/WrapperWidget.h
+@@ -23,6 +23,8 @@ struct _WrapperWidget {
+ 	gboolean needs_allocation;
+ 	gboolean intercepting_touch;
+ 	gboolean custom_dispatch_touch;
++	gboolean touch_declined;          /* ATL: transparent for picks around (declined_x, declined_y) */
++	double declined_x, declined_y;
+ 	gboolean hover_exit_pending;
+ 	int hover_x;
+ 	int hover_y;
+@@ -44,5 +46,7 @@ void wrapper_widget_consume_touch_events(WrapperWidget *wrapper);
+ void wrapper_widget_register_invalidation_listener(WrapperWidget *wrapper);
+ 
+ void _setOnTouchListener(JNIEnv *env, jobject this, GtkWidget *widget);
++gboolean atl_widget_takes_pointer(GtkWidget *widget);
++void atl_touch_declined(WrapperWidget *wrapper, double x, double y);
+ 
+ #endif
+-- 
+2.43.0
+

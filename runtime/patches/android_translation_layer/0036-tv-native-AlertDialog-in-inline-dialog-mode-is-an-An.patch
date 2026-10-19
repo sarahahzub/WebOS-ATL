@@ -1,0 +1,228 @@
+From 8b91951cad23088e2648799d22032a7973f3b353 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 01:45:21 +0530
+Subject: [PATCH 36/42] tv: native AlertDialog in inline-dialog mode is an
+ Android-TV-like card (opaque dark rounded background, light text, title
+ shown, buttons in one row with a focus ring; ATL_ALERT_STYLE=0 off); setView
+ dialogs keep the previous layout
+
+---
+ .../app/android_app_AlertDialog.c             | 122 +++++++++++++++++-
+ src/api-impl/android/app/AlertDialog.java     |  13 ++
+ 2 files changed, 132 insertions(+), 3 deletions(-)
+
+diff --git a/src/api-impl-jni/app/android_app_AlertDialog.c b/src/api-impl-jni/app/android_app_AlertDialog.c
+index ba79c472..596c027d 100644
+--- a/src/api-impl-jni/app/android_app_AlertDialog.c
++++ b/src/api-impl-jni/app/android_app_AlertDialog.c
+@@ -1,5 +1,7 @@
+ #include <gtk/gtk.h>
+ #include <jni.h>
++#include <stdlib.h>
++#include <string.h>
+ 
+ #include "../defines.h"
+ #include "../util.h"
+@@ -14,6 +16,52 @@ static void list_entry_class_init(ListEntryClass *cls) {}
+ static void list_entry_init(ListEntry *self) {}
+ G_DEFINE_TYPE(ListEntry, list_entry, G_TYPE_OBJECT)
+ 
++/* Android-TV-like card for native AlertDialogs (inline-dialog mode); sizes in dp/sp scaled by ATL_DENSITY/160 */
++static int alert_dpi = 160;
++
++static gboolean alert_style_enabled(void)
++{
++	static int on = -1;
++	if (on < 0) {
++		const char *e = getenv("ATL_ALERT_STYLE");
++		on = e ? strcmp(e, "0") != 0 : getenv("ATL_IS_TELEVISION") != NULL;
++		if (on) {
++			const char *d = getenv("ATL_DENSITY");
++			int dpi = d && atoi(d) > 0 ? atoi(d) : 160;
++			alert_dpi = dpi;
++#define DP(x) ((int)((x) * dpi / 160.0 + 0.5))
++			char *css = g_strdup_printf(
++			    ".atl-alert-card { background-color: #2b2e33; color: #e8eaed; border-radius: %dpx; padding: %dpx %dpx %dpx %dpx;"
++			    " min-width: %dpx; box-shadow: 0 %dpx %dpx rgba(0,0,0,0.5); }"
++			    " .atl-alert-card label { color: #e8eaed; }"
++			    " .atl-alert-title { font-size: %dpx; font-weight: bold; margin-bottom: %dpx; }"
++			    " .atl-alert-message { font-size: %dpx; color: #c4c7cc; margin-bottom: %dpx; }"
++			    " .atl-alert-card listview, .atl-alert-card listview row { background: none; color: #e8eaed; }"
++			    " .atl-alert-card listview row { font-size: %dpx; padding: %dpx %dpx; border-radius: %dpx; }"
++			    " .atl-alert-card listview row:selected { background-color: transparent; }"
++			    " .atl-alert-card listview row:hover, .atl-alert-card listview row:focus { background-color: rgba(255,255,255,0.12); }"
++			    " .atl-alert-buttons { margin-top: %dpx; }"
++			    " .atl-alert-buttons button { background: none; border: none; box-shadow: none; min-height: 0; min-width: 0;"
++			    " padding: %dpx %dpx; border-radius: %dpx; outline: none; }"
++			    " .atl-alert-buttons button label { color: #8ab4f8; font-size: %dpx; font-weight: bold; }"
++			    " .atl-alert-buttons button:hover, .atl-alert-buttons button:focus { background-color: rgba(138,180,248,0.18); }"
++			    " .atl-alert-buttons button:focus { outline: %dpx solid #8ab4f8; outline-offset: 0; }",
++			    DP(8), DP(24), DP(24), DP(12), DP(24), DP(280), DP(4), DP(16),
++			    DP(20), DP(12), DP(16), DP(12), DP(16), DP(8), DP(8), DP(4),
++			    DP(8), DP(8), DP(12), DP(4), DP(14), DP(1) > 1 ? DP(1) : 1);
++			char *css2 = g_strdup_printf("%s .atl-alert-buttons button label { margin: %dpx %dpx; }", css, DP(8), DP(12));
++			g_free(css);
++			css = css2;
++#undef DP
++			GtkCssProvider *provider = gtk_css_provider_new();
++			gtk_css_provider_load_from_string(provider, css);
++			gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
++			g_free(css);
++		}
++	}
++	return on;
++}
++
+ static void setup_listitem_cb(GtkListItemFactory *factory, GtkListItem *list_item)
+ {
+ 	gtk_list_item_set_child(list_item, gtk_label_new(""));
+@@ -43,10 +91,28 @@ JNIEXPORT void JNICALL Java_android_app_AlertDialog_nativeConstruct(JNIEnv *env,
+ {
+ 	GtkWindow *dialog = GTK_WINDOW(_PTR(ptr));
+ 	GtkBox *content_area = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 1));
++	/* styled: card + title + button row; setView() puts the plain layout back (see nativeSetView) */
++	gboolean styled = alert_style_enabled();
++	if (styled)
++		gtk_widget_add_css_class(GTK_WIDGET(content_area), "atl-alert-card");
++
++	GtkLabel *title = GTK_LABEL(gtk_label_new(NULL));
++	gtk_label_set_wrap(title, TRUE);
++	gtk_label_set_max_width_chars(title, 40);
++	gtk_label_set_xalign(title, 0);
++	gtk_widget_add_css_class(GTK_WIDGET(title), "atl-alert-title");
++	gtk_widget_set_visible(GTK_WIDGET(title), FALSE);
++	gtk_box_append(content_area, GTK_WIDGET(title));
++	g_object_set_data_full(G_OBJECT(dialog), "title", g_object_ref(title), g_object_unref);
+ 
+ 	GtkLabel *label = GTK_LABEL(gtk_label_new(NULL));
+ 	gtk_label_set_wrap(label, TRUE);
+ 	gtk_label_set_max_width_chars(label, 50);
++	if (styled) {
++		gtk_label_set_xalign(label, 0);
++		gtk_widget_add_css_class(GTK_WIDGET(label), "atl-alert-message");
++		gtk_widget_set_visible(GTK_WIDGET(label), FALSE); /* shown by setMessage */
++	}
+ 	gtk_box_append(content_area, GTK_WIDGET(label));
+ 	g_object_set_data_full(G_OBJECT(dialog), "label", g_object_ref(label), g_object_unref);
+ 
+@@ -56,12 +122,25 @@ JNIEXPORT void JNICALL Java_android_app_AlertDialog_nativeConstruct(JNIEnv *env,
+ 	GtkListView *list = GTK_LIST_VIEW(gtk_list_view_new(NULL, factory));
+ 	gtk_list_view_set_single_click_activate(list, TRUE);
+ 	g_signal_connect(list, "activate", G_CALLBACK(activate_cb), NULL);
++	if (styled)
++		gtk_widget_set_visible(GTK_WIDGET(list), FALSE); /* shown by setItems */
+ 	gtk_box_append(content_area, GTK_WIDGET(list));
+ 	g_object_set_data_full(G_OBJECT(dialog), "list", g_object_ref(list), g_object_unref);
+ 
+-	gtk_box_append(content_area, gtk_widget_get_parent(GTK_WIDGET(_PTR(button_positive_ptr))));
+-	gtk_box_append(content_area, gtk_widget_get_parent(GTK_WIDGET(_PTR(button_negative_ptr))));
+-	gtk_box_append(content_area, gtk_widget_get_parent(GTK_WIDGET(_PTR(button_neutral_ptr))));
++	/* positive, negative, neutral (focus order). Styled: one right-aligned RTL row, so it reads
++	 * [neutral] [negative] [positive] as on Android while focus still starts at positive */
++	GtkWidget *buttons = gtk_box_new(styled ? GTK_ORIENTATION_HORIZONTAL : GTK_ORIENTATION_VERTICAL, 1);
++	gtk_box_append(GTK_BOX(buttons), gtk_widget_get_parent(GTK_WIDGET(_PTR(button_positive_ptr))));
++	gtk_box_append(GTK_BOX(buttons), gtk_widget_get_parent(GTK_WIDGET(_PTR(button_negative_ptr))));
++	gtk_box_append(GTK_BOX(buttons), gtk_widget_get_parent(GTK_WIDGET(_PTR(button_neutral_ptr))));
++	if (styled) {
++		gtk_box_set_spacing(GTK_BOX(buttons), alert_dpi * 8 / 160);
++		gtk_widget_set_direction(buttons, GTK_TEXT_DIR_RTL);
++		gtk_widget_set_halign(buttons, GTK_ALIGN_START); /* START in RTL = right edge */
++		gtk_widget_add_css_class(buttons, "atl-alert-buttons");
++	}
++	gtk_box_append(content_area, buttons);
++	g_object_set_data_full(G_OBJECT(dialog), "buttons", g_object_ref(buttons), g_object_unref);
+ 
+ 	/* the decor wrapper set by Dialog.nativeInit; AlertDialog.setView() puts it back after the list */
+ 	GtkWidget *decor = gtk_window_get_child(dialog);
+@@ -76,6 +155,29 @@ JNIEXPORT void JNICALL Java_android_app_AlertDialog_nativeSetView(JNIEnv *env, j
+ 	GtkWindow *dialog = GTK_WINDOW(_PTR(ptr));
+ 	GtkWidget *decor = g_object_get_data(G_OBJECT(dialog), "atl-decor");
+ 	GtkWidget *list = g_object_get_data(G_OBJECT(dialog), "list");
++	/* custom content: back to the plain (pre-style) layout, the app's view brings its own look */
++	g_object_set_data(G_OBJECT(dialog), "atl-custom-view", GINT_TO_POINTER(1));
++	GtkWidget *title = g_object_get_data(G_OBJECT(dialog), "title");
++	GtkWidget *label = g_object_get_data(G_OBJECT(dialog), "label");
++	GtkWidget *buttons = g_object_get_data(G_OBJECT(dialog), "buttons");
++	if (title)
++		gtk_widget_set_visible(title, FALSE);
++	if (label) {
++		gtk_widget_remove_css_class(label, "atl-alert-message");
++		gtk_label_set_xalign(GTK_LABEL(label), 0.5);
++		gtk_widget_set_visible(label, TRUE);
++	}
++	if (list) {
++		gtk_widget_remove_css_class(gtk_widget_get_parent(list), "atl-alert-card");
++		gtk_widget_set_visible(list, TRUE);
++	}
++	if (buttons) {
++		gtk_widget_remove_css_class(buttons, "atl-alert-buttons");
++		gtk_orientable_set_orientation(GTK_ORIENTABLE(buttons), GTK_ORIENTATION_VERTICAL);
++		gtk_box_set_spacing(GTK_BOX(buttons), 1);
++		gtk_widget_set_direction(buttons, GTK_TEXT_DIR_NONE);
++		gtk_widget_set_halign(buttons, GTK_ALIGN_FILL);
++	}
+ 	if (!decor || !list || gtk_widget_get_parent(decor))
+ 		return;
+ 	gtk_box_insert_child_after(GTK_BOX(gtk_widget_get_parent(list)), decor, list);
+@@ -89,6 +191,19 @@ JNIEXPORT void JNICALL Java_android_app_AlertDialog_nativeSetMessage(JNIEnv *env
+ 	const char *nativeMessage = (*env)->GetStringUTFChars(env, message, NULL);
+ 	gtk_label_set_text(label, nativeMessage);
+ 	(*env)->ReleaseStringUTFChars(env, message, nativeMessage);
++	gtk_widget_set_visible(GTK_WIDGET(label), TRUE);
++}
++
++JNIEXPORT void JNICALL Java_android_app_AlertDialog_nativeSetAlertTitle(JNIEnv *env, jobject this, jlong ptr, jstring title)
++{
++	GtkWindow *dialog = GTK_WINDOW(_PTR(ptr));
++	GtkLabel *label = g_object_get_data(G_OBJECT(dialog), "title");
++	if (!label || !title)
++		return;
++	const char *nativeTitle = (*env)->GetStringUTFChars(env, title, NULL);
++	gtk_label_set_text(label, nativeTitle);
++	gtk_widget_set_visible(GTK_WIDGET(label), nativeTitle[0] && alert_style_enabled() && !g_object_get_data(G_OBJECT(dialog), "atl-custom-view"));
++	(*env)->ReleaseStringUTFChars(env, title, nativeTitle);
+ }
+ 
+ JNIEXPORT void JNICALL Java_android_app_AlertDialog_nativeSetItems(JNIEnv *env, jobject this, jlong ptr, jobjectArray items, jobject on_click)
+@@ -105,6 +220,7 @@ JNIEXPORT void JNICALL Java_android_app_AlertDialog_nativeSetItems(JNIEnv *env,
+ 	}
+ 	GtkSelectionModel *model = GTK_SELECTION_MODEL(gtk_single_selection_new(G_LIST_MODEL(store)));
+ 	gtk_list_view_set_model(list, model);
++	gtk_widget_set_visible(GTK_WIDGET(list), TRUE);
+ 
+ 	g_object_set_data(G_OBJECT(list), "this", _REF(this));
+ 	g_object_set_data(G_OBJECT(list), "on_click", _REF(on_click));
+diff --git a/src/api-impl/android/app/AlertDialog.java b/src/api-impl/android/app/AlertDialog.java
+index b729403b..641adaa1 100644
+--- a/src/api-impl/android/app/AlertDialog.java
++++ b/src/api-impl/android/app/AlertDialog.java
+@@ -17,6 +17,7 @@ public class AlertDialog extends Dialog implements DialogInterface {
+ 	private native void nativeSetMessage(long ptr, String message);
+ 	private native void nativeSetItems(long ptr, String[] items, DialogInterface.OnClickListener listener);
+ 	private native void nativeSetView(long ptr);
++	private native void nativeSetAlertTitle(long ptr, String title);
+ 
+ 	public AlertDialog(Context context) {
+ 		this(context, 0);
+@@ -33,6 +34,18 @@ public class AlertDialog extends Dialog implements DialogInterface {
+ 		nativeConstruct(nativePtr, buttons[0].widget, buttons[1].widget, buttons[2].widget);
+ 	}
+ 
++	@Override
++	public void setTitle(CharSequence title) {
++		super.setTitle(title);
++		if (buttons != null) // not during Dialog's constructor
++			nativeSetAlertTitle(nativePtr, title == null ? "" : String.valueOf(title));
++	}
++
++	@Override
++	public void setTitle(int titleId) {
++		setTitle(getContext().getText(titleId));
++	}
++
+ 	public void setMessage(CharSequence message) {
+ 		System.out.println("AlertDialog setMessage called with: '" + message + "'");
+ 		nativeSetMessage(nativePtr, String.valueOf(message));
+-- 
+2.43.0
+

@@ -1,0 +1,31 @@
+From 4c8442b9a29629376c0f97d14b92ae760319dbe4 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 22:12:18 +0530
+Subject: [PATCH 32/42] tv: Context.getCodeCacheDir() is <data dir>/code_cache
+ (was a null stub; DexClassLoader opt dir)
+
+---
+ src/api-impl/android/content/Context.java | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/api-impl/android/content/Context.java b/src/api-impl/android/content/Context.java
+index f90b9367..5cc4000a 100644
+--- a/src/api-impl/android/content/Context.java
++++ b/src/api-impl/android/content/Context.java
+@@ -282,6 +282,13 @@ public abstract class Context {
+ 		return new File[] {getObbDir()};
+ 	}
+ 
++	public File getCodeCacheDir() {
++		File code_cache_dir = new File(getDataDirFile(), "code_cache");
++		if (!code_cache_dir.exists() && !code_cache_dir.mkdirs() && !code_cache_dir.exists())
++			Slog.w(TAG, "Unable to create code_cache directory >" + code_cache_dir.getPath() + "<");
++		return code_cache_dir;
++	}
++
+ 	public File getCacheDir() {
+ 		if (cache_dir == null) {
+ 			cache_dir = new File("/tmp/atl_cache/" + getPackageName());
+-- 
+2.43.0
+

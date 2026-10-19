@@ -1,0 +1,125 @@
+From 3c632ae5015ef912315fc04d6f80c5bbdc4a5a5a Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 22:19:42 +0530
+Subject: [PATCH 18/42] tv: theme attributes in drawables/colours resolve
+ (StateListDrawable passes the theme, TypedArray resolves leftover ?attr
+ through its theme, else default instead of throwing) - CloudStream setup
+ screen was black
+
+---
+ .../android/content/res/TypedArray.java       | 48 +++++++++++++------
+ .../graphics/drawable/StateListDrawable.java  |  4 +-
+ 2 files changed, 36 insertions(+), 16 deletions(-)
+
+diff --git a/src/api-impl/android/content/res/TypedArray.java b/src/api-impl/android/content/res/TypedArray.java
+index 9a24c8a4..61556114 100644
+--- a/src/api-impl/android/content/res/TypedArray.java
++++ b/src/api-impl/android/content/res/TypedArray.java
+@@ -448,8 +448,15 @@ public class TypedArray implements AutoCloseable {
+ 		} else if (type == TypedValue.TYPE_ATTRIBUTE) {
+ 			final TypedValue value = mValue;
+ 			getValueAt(index, value);
+-			throw new UnsupportedOperationException(
+-			    "Failed to resolve attribute at index " + index + ": " + value);
++			if (!resolveThemeAttr(index / AssetManager.STYLE_NUM_ENTRIES, value))
++				return defValue;
++			if (value.type >= TypedValue.TYPE_FIRST_INT && value.type <= TypedValue.TYPE_LAST_INT)
++				return value.data;
++			if (value.type == TypedValue.TYPE_STRING || value.type == TypedValue.TYPE_REFERENCE) {
++				ColorStateList csl = mResources.loadColorStateList(value, value.resourceId, mTheme);
++				return csl != null ? csl.getDefaultColor() : defValue;
++			}
++			return defValue;
+ 		}
+ 
+ 		throw new UnsupportedOperationException("Can't convert to color: type=0x" + Integer.toHexString(type));
+@@ -479,10 +486,10 @@ public class TypedArray implements AutoCloseable {
+ 
+ 		final TypedValue value = mValue;
+ 		if (getValueAt(index * AssetManager.STYLE_NUM_ENTRIES, value)) {
+-			if (value.type == TypedValue.TYPE_ATTRIBUTE) {
+-				throw new UnsupportedOperationException(
+-				    "Failed to resolve attribute at index " + index + ": " + value);
+-			}
++			if (value.type == TypedValue.TYPE_ATTRIBUTE && !resolveThemeAttr(index, value))
++				return null;
++			if (value.type >= TypedValue.TYPE_FIRST_COLOR_INT && value.type <= TypedValue.TYPE_LAST_COLOR_INT)
++				return ColorStateList.valueOf(value.data);
+ 			return mResources.loadComplexColor(value, value.resourceId, mTheme);
+ 		}
+ 		return null;
+@@ -514,10 +521,10 @@ public class TypedArray implements AutoCloseable {
+ 
+ 		final TypedValue value = mValue;
+ 		if (getValueAt(index * AssetManager.STYLE_NUM_ENTRIES, value)) {
+-			if (value.type == TypedValue.TYPE_ATTRIBUTE) {
+-				throw new UnsupportedOperationException(
+-				    "Failed to resolve attribute at index " + index + ": " + value);
+-			}
++			if (value.type == TypedValue.TYPE_ATTRIBUTE && !resolveThemeAttr(index, value))
++				return null;
++			if (value.type >= TypedValue.TYPE_FIRST_COLOR_INT && value.type <= TypedValue.TYPE_LAST_COLOR_INT)
++				return ColorStateList.valueOf(value.data);
+ 			return mResources.loadColorStateList(value, value.resourceId, mTheme);
+ 		}
+ 		return null;
+@@ -883,6 +890,19 @@ public class TypedArray implements AutoCloseable {
+ 	 *         not a color or drawable resource.
+ 	 */
+ 	@Nullable
++	/* ATL: an attribute reference left in the data (no theme when it was obtained): resolve it through mTheme.
++	 * Returns false (and logs once per attribute) if there is no theme or the theme does not define it. */
++	private static java.util.Set<Integer> sUnresolved = new java.util.HashSet<>();
++	private boolean resolveThemeAttr(int index, TypedValue value) {
++		int attr = value.data;
++		if (mTheme != null && mTheme.resolveAttribute(attr, value, true) && value.type != TypedValue.TYPE_ATTRIBUTE)
++			return true;
++		if (sUnresolved.add(attr))
++			android.util.Log.w("TypedArray", "unresolved theme attribute 0x" + Integer.toHexString(attr) + " at index " + index
++			                   + (mTheme == null ? " (no theme)" : "") + ": using the default");
++		return false;
++	}
++
+ 	public Drawable getDrawable(/*@StyleableRes*/ int index) {
+ 		if (mRecycled) {
+ 			throw new RuntimeException("Cannot make calls to a recycled instance!");
+@@ -890,10 +910,10 @@ public class TypedArray implements AutoCloseable {
+ 
+ 		final TypedValue value = mValue;
+ 		if (getValueAt(index * AssetManager.STYLE_NUM_ENTRIES, value)) {
+-			if (value.type == TypedValue.TYPE_ATTRIBUTE) {
+-				throw new UnsupportedOperationException(
+-				    "Failed to resolve attribute at index " + index + ": " + value);
+-			}
++			if (value.type == TypedValue.TYPE_ATTRIBUTE && !resolveThemeAttr(index, value))
++				return null;
++			if (value.type == TypedValue.TYPE_NULL)
++				return null;
+ 			return mResources.loadDrawable(value, value.resourceId, mTheme);
+ 		}
+ 		return null;
+diff --git a/src/api-impl/android/graphics/drawable/StateListDrawable.java b/src/api-impl/android/graphics/drawable/StateListDrawable.java
+index 03bcd93a..0b4a6936 100644
+--- a/src/api-impl/android/graphics/drawable/StateListDrawable.java
++++ b/src/api-impl/android/graphics/drawable/StateListDrawable.java
+@@ -104,7 +104,7 @@ public class StateListDrawable extends DrawableContainer {
+ 
+ 	public void inflate(Resources r, XmlPullParser parser, AttributeSet attrs, Theme theme)
+ 	    throws XmlPullParserException, IOException {
+-		final TypedArray a = r.obtainAttributes(attrs, R.styleable.StateListDrawable);
++		final TypedArray a = obtainAttributes(r, theme, attrs, R.styleable.StateListDrawable);
+ 		a.recycle();
+ 
+ 		inflateChildElements(r, parser, attrs, theme);
+@@ -134,7 +134,7 @@ public class StateListDrawable extends DrawableContainer {
+ 
+ 			// This allows state list drawable item elements to be themed at
+ 			// inflation time but does NOT make them work for Zygote preload.
+-			final TypedArray a = r.obtainAttributes(attrs,
++			final TypedArray a = obtainAttributes(r, theme, attrs,
+ 			                                        R.styleable.StateListDrawableItem);
+ 			Drawable dr = a.getDrawable(R.styleable.StateListDrawableItem_drawable);
+ 			a.recycle();
+-- 
+2.43.0
+

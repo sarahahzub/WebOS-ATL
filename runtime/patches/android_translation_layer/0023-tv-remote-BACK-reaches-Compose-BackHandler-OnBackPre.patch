@@ -1,0 +1,106 @@
+From 3243a393b27780de6ab840c89d1a0bbd71c766ec Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 14:55:30 +0530
+Subject: [PATCH 23/42] tv: remote BACK reaches Compose
+ BackHandler/OnBackPressedDispatcher (onRtlPropertiesChanged on first measure,
+ Window.superDispatchKeyEvent, key-dispatch exceptions cleared) - TituFlix
+ crashed on BACK
+
+---
+ src/api-impl-jni/app/android_app_Activity.c |  5 ++++-
+ src/api-impl-jni/widgets/WrapperWidget.c    | 10 ++++++++--
+ src/api-impl/android/view/View.java         | 13 +++++++++++++
+ src/api-impl/android/view/Window.java       |  5 +++++
+ 4 files changed, 30 insertions(+), 3 deletions(-)
+
+diff --git a/src/api-impl-jni/app/android_app_Activity.c b/src/api-impl-jni/app/android_app_Activity.c
+index e059363c..8fef1027 100644
+--- a/src/api-impl-jni/app/android_app_Activity.c
++++ b/src/api-impl-jni/app/android_app_Activity.c
+@@ -386,8 +386,11 @@ static gboolean activity_key(guint keyval, guint keycode, GdkModifierType state,
+ 		target = activity_current;
+ 	jmethodID dispatch = _METHOD(_CLASS(target), "dispatchKeyEvent", "(Landroid/view/KeyEvent;)Z");
+ 	gboolean ret = (*env)->CallBooleanMethod(env, target, dispatch, key_event);
+-	if ((*env)->ExceptionCheck(env))
++	if ((*env)->ExceptionCheck(env)) { /* ART keeps it pending after Describe: the next JNI call would abort */
+ 		(*env)->ExceptionDescribe(env);
++		(*env)->ExceptionClear(env);
++		ret = FALSE; /* not consumed: the key bubbles on (window -> Activity: BACK -> onBackPressed) */
++	}
+ 	(*env)->DeleteLocalRef(env, key_event);
+ 	return ret;
+ }
+diff --git a/src/api-impl-jni/widgets/WrapperWidget.c b/src/api-impl-jni/widgets/WrapperWidget.c
+index f1ce517d..61edfe6b 100644
+--- a/src/api-impl-jni/widgets/WrapperWidget.c
++++ b/src/api-impl-jni/widgets/WrapperWidget.c
+@@ -542,8 +542,11 @@ static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval,
+ 	jobject key_event = (*env)->NewObject(env, handle_cache.key_event.class, handle_cache.key_event.constructor, (jlong)0, (jlong)0, ACTION_DOWN, atl_map_key_code(keyval, keycode), 0, map_meta_state(state));
+ 	_SET_INT_FIELD(key_event, "unicodeValue", gdk_keyval_to_unicode(keyval));
+ 	gboolean ret = (*env)->CallBooleanMethod(env, wrapper->jobj, handle_cache.view.dispatchKeyEvent, key_event);
+-	if ((*env)->ExceptionCheck(env))
++	if ((*env)->ExceptionCheck(env)) { /* ART keeps it pending after Describe: the next JNI call would abort */
+ 		(*env)->ExceptionDescribe(env);
++		(*env)->ExceptionClear(env);
++		ret = FALSE; /* not consumed: the key bubbles on (window -> Activity: BACK -> onBackPressed) */
++	}
+ 	return ret;
+ }
+ 
+@@ -554,8 +557,11 @@ static gboolean on_key_released(GtkEventControllerKey *controller, guint keyval,
+ 	jobject key_event = (*env)->NewObject(env, handle_cache.key_event.class, handle_cache.key_event.constructor, (jlong)0, (jlong)0, ACTION_UP, atl_map_key_code(keyval, keycode), 0, map_meta_state(state));
+ 	_SET_INT_FIELD(key_event, "unicodeValue", gdk_keyval_to_unicode(keyval));
+ 	gboolean ret = (*env)->CallBooleanMethod(env, wrapper->jobj, handle_cache.view.dispatchKeyEvent, key_event);
+-	if ((*env)->ExceptionCheck(env))
++	if ((*env)->ExceptionCheck(env)) { /* ART keeps it pending after Describe: the next JNI call would abort */
+ 		(*env)->ExceptionDescribe(env);
++		(*env)->ExceptionClear(env);
++		ret = FALSE; /* not consumed: the key bubbles on (window -> Activity: BACK -> onBackPressed) */
++	}
+ 	return ret;
+ }
+ 
+diff --git a/src/api-impl/android/view/View.java b/src/api-impl/android/view/View.java
+index ab260613..b2fb4ba2 100644
+--- a/src/api-impl/android/view/View.java
++++ b/src/api-impl/android/view/View.java
+@@ -1575,7 +1575,20 @@ public class View implements Drawable.Callback {
+ 
+ 	public void setOnHoverListener(OnHoverListener listener) {}
+ 
++	private boolean atl_rtl_resolved;
++
++	/* Android resolves RTL properties during measure and tells the view; Compose needs it (FocusOwner.layoutDirection) */
++	public void onRtlPropertiesChanged(int layoutDirection) {}
++
++	public KeyEvent.DispatcherState getKeyDispatcherState() {
++		return null;
++	}
++
+ 	public final void measure(int widthMeasureSpec, int heightMeasureSpec) {
++		if (!atl_rtl_resolved) {
++			atl_rtl_resolved = true;
++			onRtlPropertiesChanged(getLayoutDirection());
++		}
+ 		if (layoutRequested || widthMeasureSpec != oldWidthMeasureSpec || heightMeasureSpec != oldHeightMeasureSpec) {
+ 			layoutRequested = false;
+ 			oldWidthMeasureSpec = widthMeasureSpec;
+diff --git a/src/api-impl/android/view/Window.java b/src/api-impl/android/view/Window.java
+index 9efeaa4c..3e4ef7d0 100644
+--- a/src/api-impl/android/view/Window.java
++++ b/src/api-impl/android/view/Window.java
+@@ -148,6 +148,11 @@ public class Window {
+ 		return context;
+ 	}
+ 
++	/* androidx KeyEventDispatcher (SDK_INT < 28): the view hierarchy already had the key through GTK */
++	public boolean superDispatchKeyEvent(KeyEvent event) {
++		return false;
++	}
++
+ 	public boolean hasFeature(int featureId) {
+ 		return false;
+ 	}
+-- 
+2.43.0
+

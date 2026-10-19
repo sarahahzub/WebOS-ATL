@@ -1,0 +1,52 @@
+From 6d9ee13612277761cca200399ba7f2983df13e98 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 22:12:19 +0530
+Subject: [PATCH 34/42] tv: android.net.Network has a netId
+ (toString/equals/hashCode/getNetworkHandle as AOSP) - Cronet below API 23
+ parseInt(network.toString()) killed SmartTube
+
+---
+ src/api-impl/android/net/Network.java | 27 ++++++++++++++++++++++++++-
+ 1 file changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/src/api-impl/android/net/Network.java b/src/api-impl/android/net/Network.java
+index 04c98e39..f8859c1f 100644
+--- a/src/api-impl/android/net/Network.java
++++ b/src/api-impl/android/net/Network.java
+@@ -1,7 +1,32 @@
+ package android.net;
+ 
+ public class Network {
++	public final int netId;
++
++	public Network() {
++		this(100);
++	}
++
++	public Network(int netId) {
++		this.netId = netId;
++	}
++
+ 	public long getNetworkHandle() {
+-		return 1L;
++		return ((long)netId << 32) | 0xfacadeL;
++	}
++
++	@Override
++	public boolean equals(Object obj) {
++		return obj instanceof Network && ((Network)obj).netId == netId;
++	}
++
++	@Override
++	public int hashCode() {
++		return netId * 11;
++	}
++
++	@Override
++	public String toString() {
++		return Integer.toString(netId);
+ 	}
+ }
+-- 
+2.43.0
+

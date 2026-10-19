@@ -1,0 +1,30 @@
+From 0c8b5198a4bb19e0563ace03b36133f6e365698a Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 16:04:37 +0530
+Subject: [PATCH 06/42] tv: ImageView unwraps TransitionDrawable (Glide
+ cross-fade)
+
+---
+ src/api-impl/android/widget/ImageView.java | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/api-impl/android/widget/ImageView.java b/src/api-impl/android/widget/ImageView.java
+index ca1d961f..a9ce79fb 100644
+--- a/src/api-impl/android/widget/ImageView.java
++++ b/src/api-impl/android/widget/ImageView.java
+@@ -99,6 +99,12 @@ public class ImageView extends View {
+ 	}
+ 
+ 	public void setImageDrawable(Drawable drawable) {
++		if (drawable instanceof android.graphics.drawable.TransitionDrawable) { // see armhf/patches/imageview-transition.py
++			android.graphics.drawable.TransitionDrawable td = (android.graphics.drawable.TransitionDrawable) drawable;
++			int n = td.getNumberOfLayers();
++			if (n > 0)
++				drawable = td.getDrawable(n - 1);
++		}
+ 		if (drawable != null && colorFilter != null) {
+ 			drawable = drawable.mutate();
+ 			drawable.setColorFilter(colorFilter);
+-- 
+2.43.0
+

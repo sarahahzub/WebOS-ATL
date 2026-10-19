@@ -1,0 +1,33 @@
+From 7959ff41faaca8a8c72632460a2dc5bd7c823fff Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 16:04:37 +0530
+Subject: [PATCH 03/42] tv: ATL_DENSITY env sets display density (TV = 320 dpi
+ -> 960x540 dp)
+
+---
+ src/api-impl/android/util/DisplayMetrics.java | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/api-impl/android/util/DisplayMetrics.java b/src/api-impl/android/util/DisplayMetrics.java
+index 0ec6ee8c..bcb8c7e1 100644
+--- a/src/api-impl/android/util/DisplayMetrics.java
++++ b/src/api-impl/android/util/DisplayMetrics.java
+@@ -282,6 +282,15 @@ public class DisplayMetrics {
+ 		// when running in the emulator, allowing for dynamic configurations.
+ 		// The reason for this is that ro.sf.lcd_density is write-once and is
+ 		// set by the init process when it parses build.prop before anything else.
++		String d = System.getenv("ATL_DENSITY");
++		if (d != null) {
++			try {
++				int v = Integer.parseInt(d.trim());
++				if (v >= 80 && v <= 640)
++					return v;
++			} catch (NumberFormatException e) {
++			}
++		}
+ 		return DENSITY_DEFAULT;
+ 	}
+ }
+-- 
+2.43.0
+

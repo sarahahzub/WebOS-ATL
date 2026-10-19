@@ -1,0 +1,318 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>webOS ATL</title>
+<meta name="viewport" content="width=1920,height=1080">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#101218;color:#e8eaf0;font:28px/1.35 "LG Smart UI","Museo Sans",system-ui,sans-serif;overflow:hidden}
+#side{position:fixed;left:0;top:0;bottom:0;width:360px;background:#171a22;padding:56px 28px}
+#side h1{font-size:40px;margin:0 0 6px;display:flex;align-items:center;gap:16px}
+#side h1 img{width:56px;height:56px}
+#side .ver{color:#8a92a6;font-size:22px;margin:0 0 44px}
+.tab{display:block;width:100%;text-align:left;margin:0 0 12px;padding:18px 26px;border-radius:16px;background:none;color:#c3c8d4;font-size:30px}
+.tab.on{background:#232837;color:#fff}
+#main{position:fixed;left:360px;right:0;top:0;bottom:0;padding:56px 64px;overflow:hidden}
+.page{display:none;height:100%;overflow:hidden}.page.on{display:block}
+h2{font-size:38px;margin:0 0 28px;font-weight:600}
+button{font:inherit;border:0;border-radius:14px;padding:16px 28px;background:#262b38;color:#e8eaf0;margin:0 14px 14px 0;outline:none;transition:transform .12s,background .12s}
+button:focus,.app:focus,.tab:focus,pre:focus{outline:none;background:#3ddc84;color:#08311a;transform:scale(1.05)}
+button.danger:focus{background:#e5484d;color:#fff}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;margin-bottom:34px}
+.card{background:#1b1f29;border-radius:18px;padding:22px 26px}
+.card .k{color:#8a92a6;font-size:22px}.card .v{font-size:32px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ok{color:#3ddc84}.bad{color:#ff7b7b}.warn{color:#ffc65c}
+.bar{height:14px;background:#262b38;border-radius:7px;overflow:hidden;margin:10px 0 6px}.bar i{display:block;height:100%;width:0;background:#3ddc84;transition:width .3s}
+#upmsg{color:#aab1c2;font-size:24px;min-height:34px}
+#applist{display:grid;grid-template-columns:repeat(5,1fr);gap:26px;overflow:hidden}
+.app{background:#1b1f29;border-radius:22px;padding:24px 14px 18px;text-align:center;transition:transform .12s,background .12s}
+.app img{width:150px;height:150px;border-radius:34px;display:block;margin:0 auto 14px;background:#262b38}
+.app .t{font-size:25px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.app .s{font-size:20px;color:#8a92a6}
+.app:focus .s{color:#0b3d1f}
+#detail{display:none}#detail.on{display:block}
+.dhead{display:flex;gap:30px;align-items:center;margin-bottom:28px}.dhead img{width:170px;height:170px;border-radius:38px}
+.dhead .t{font-size:42px;font-weight:600}.dhead .s{color:#8a92a6;font-size:22px;margin-top:6px}
+.row{display:flex;align-items:center;gap:6px;margin:0 0 6px}.row .lab{width:420px;color:#aab1c2}
+.row button{margin:0 12px 10px 0;padding:12px 24px}.row button.sel{box-shadow:inset 0 0 0 3px #3ddc84}
+pre{background:#0b0d12;border-radius:14px;padding:22px;font:20px/1.4 monospace;white-space:pre-wrap;word-break:break-all;height:760px;overflow:hidden;margin:0}
+#toast{position:fixed;right:50px;bottom:44px;background:#232837;padding:18px 30px;border-radius:14px;font-size:26px;opacity:0;transition:opacity .3s;max-width:900px}
+#toast.on{opacity:1}
+#confirm{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center}
+#confirm.on{display:flex}#confirm div{background:#1b1f29;border-radius:22px;padding:44px 52px;max-width:900px}
+#confirm p{font-size:32px;margin:0 0 30px}
+.hint{color:#6f778a;font-size:22px;margin-top:18px}
+input{font:inherit;font-size:26px;width:900px;padding:14px 20px;border-radius:14px;border:2px solid #262b38;background:#0b0d12;color:#e8eaf0;margin:0 14px 14px 0;outline:none}
+input:focus{border-color:#3ddc84}
+#setup{position:fixed;inset:0;background:#101218;display:none;padding:80px 120px}#setup.on{display:block}
+#setup h1{font-size:52px;margin:0 0 10px}#setup .lead{color:#aab1c2;font-size:28px;margin:0 0 34px;max-width:1500px}
+#setup ul{margin:0 0 30px;padding-left:34px;color:#c3c8d4;font-size:26px}#setup pre{height:380px;margin-top:20px}
+.big{font-size:34px;color:#3ddc84}
+</style></head><body>
+<div id="side">
+ <h1><img src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='32' cy='32' r='32' fill='%233ddc84'/><path d='M14 40a18 18 0 0 1 36 0z' fill='%23fff'/><circle cx='25' cy='33' r='2.6' fill='%233ddc84'/><circle cx='39' cy='33' r='2.6' fill='%233ddc84'/><path d='M20 20l5 7M44 20l-5 7' stroke='%23fff' stroke-width='3' stroke-linecap='round'/></svg>">webOS ATL</h1>
+ <div class="ver" id="ver">Android apps on webOS</div>
+ <button class="tab on" data-p="status">Status</button>
+ <button class="tab" data-p="apps">Android apps</button>
+ <button class="tab" data-p="settings">Settings</button>
+ <button class="tab" data-p="logs">Logs</button>
+</div>
+<div id="main">
+ <div class="page on" id="p-status">
+  <h2>Status</h2>
+  <div class="cards" id="cards"></div>
+  <div class="card" style="margin-bottom:28px"><div class="k">Runtime and updates</div>
+   <div class="bar"><i id="upbar"></i></div><div id="upmsg">…</div></div>
+  <button id="b-update">Check for updates</button><button id="b-force" style="display:none">Install runtime now</button><button id="b-reicon">Refresh app icons</button>
+  <button id="b-atld">Restart app service</button><button id="b-apkweb">Restart phone page</button><button id="b-remove" class="danger">Uninstall webOS ATL</button>
+  <div class="hint" id="hint"></div>
+ </div>
+ <div class="page" id="p-apps">
+  <div id="listwrap"><h2>Android apps</h2><div id="applist"></div><div class="hint">OK: app settings · install apps from a phone or laptop browser at <span class="ip big"></span></div>
+  <div style="margin-top:22px"><input id="url" type="url" placeholder="…or type a direct link to an .apk"><button id="b-url">Install from link</button></div></div>
+  <div id="detail"></div>
+ </div>
+ <div class="page" id="p-settings"><h2>Settings</h2><div id="sets"></div>
+  <div class="hint">Defaults for every Android app; each app can override them under Android apps.</div></div>
+ <div class="page" id="p-logs"><h2>Logs</h2>
+  <div id="logbtns"></div><pre id="logview" tabindex="0"></pre></div>
+</div>
+<div id="setup"><h1>webOS ATL</h1>
+ <p class="lead">Runs Android apps on this TV. Setup copies the programs to /media/developer/webosatl, adds a start-up hook
+ (Homebrew Channel) and then downloads the Android runtime (about 200 MB) in the background.</p>
+ <ul><li>Needs a rooted TV with Homebrew Channel, a 64-bit (aarch64) CPU and 600 MB free space</li>
+ <li>1.5 GB RAM or more recommended; tested on LG 43UR7500 (webOS 23)</li>
+ <li>Remove it any time: Uninstall in this app, then remove the app in Homebrew Channel</li></ul>
+ <button id="b-install">Install</button><button id="b-exit">Exit</button>
+ <pre id="setuplog" tabindex="0"></pre></div>
+<div id="toast"></div>
+<div id="confirm"><div><p id="cmsg"></p><button id="cyes" class="danger">Yes</button><button id="cno">Cancel</button></div></div>
+<script>
+const API = location.protocol.startsWith('http') ? '' : 'http://127.0.0.1:8791';
+const APPDIR = decodeURIComponent(location.pathname.replace(/\/[^/]*$/, ''));  // .../applications/org.webosatl.manager
+const PAYLOAD = APPDIR + '/payload';
+/* root shell through Homebrew Channel (luna://org.webosbrew.hbchannel.service). spawn streams output: onLine(text) */
+function hbc(method, params, cb) {
+  if (typeof PalmServiceBridge == 'undefined') { cb({returnValue: false, errorText: 'not running on webOS'}); return null; }
+  const b = new PalmServiceBridge(); hbc.keep = (hbc.keep || []).concat([b]);
+  b.onservicecallback = m => { let j = {}; try { j = JSON.parse(m); } catch (e) {} cb(j); };
+  b.call('luna://org.webosbrew.hbchannel.service/' + method, JSON.stringify(params));
+  return b;
+}
+function rootRun(cmd, onLine) {
+  return new Promise((res, rej) => {
+    let rc = null, buf = '';
+    const line = t => { buf += t; const p = buf.split('\n'); buf = p.pop(); p.forEach(onLine); };
+    const b = hbc('spawn', {command: cmd}, j => {
+      if (j.returnValue === false) { if (buf) onLine(buf); return rej(new Error(j.errorText || 'Homebrew Channel service not available (is the TV rooted?)')); }
+      if (j.event == 'stdoutData') line(j.stdoutString || ''); else if (j.event == 'stderrData') line(j.stderrString || '');
+      else if (j.event == 'close' || j.event == 'exit') { if (rc !== null) return; rc = j.closeCode ?? j.exitCode; if (buf) onLine(buf); buf = ''; res(rc); }
+    });
+    if (!b) rej(new Error('not running on webOS'));
+  });
+}
+const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+let page = 'status', detailId = null, apps = [], st = null, sets = null;
+function api(p, o) {
+  return fetch(API + p, o).then(r => r.headers.get('content-type')?.includes('json') ? r.json() : r.text());
+}
+const post = (p, body) => api(p, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})});
+function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('on'), 4000); }
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c])); }
+function confirmBox(msg) {
+  return new Promise(res => {
+    const c = $('#confirm'), prev = document.activeElement; $('#cmsg').textContent = msg; c.classList.add('on'); $('#cno').focus();
+    const done = v => { c.classList.remove('on'); $('#cyes').onclick = $('#cno').onclick = null; confirmBox.open = null; prev && prev.focus(); res(v); };
+    $('#cyes').onclick = () => done(true); $('#cno').onclick = () => done(false); confirmBox.open = done;
+  });
+}
+/* ---------- pages ---------- */
+function show(p, noload) {
+  page = p; $$('.tab').forEach(t => t.classList.toggle('on', t.dataset.p == p));
+  $$('.page').forEach(x => x.classList.toggle('on', x.id == 'p-' + p));
+  if (p == 'apps') loadApps(); if (p == 'settings') loadSettings(); if (p == 'logs' && !noload) loadLog('mgr');
+}
+$$('.tab').forEach(t => { t.onclick = () => focusFirst(); t.onfocus = () => { if (page != t.dataset.p) show(t.dataset.p); }; });
+function card(k, v, cls) { return `<div class="card"><div class="k">${k}</div><div class="v ${cls || ''}">${v}</div></div>`; }
+function loadStatus() {
+  return api('/api/status').then(s => {
+    st = s; $('#ver').textContent = 'Version ' + s.version;
+    $$('.ip').forEach(e => e.textContent = s.apkweb_url);
+    const d = s.disk || {}, m = s.mem || {}, r = s.runtime || {};
+    const upd = s.latest && s.latest != s.version && s.latest != s.payload_version;
+    $('#cards').innerHTML = card('Android runtime', r.mounted ? (r.version || 'ready') + (r.ok ? '' : ' (update pending)') : (s.progress.state == 'downloading' ? 'downloading…' : 'not installed'), r.mounted ? 'ok' : 'warn') +
+      card('App service', s.atld ? 'running' : 'stopped', s.atld ? 'ok' : 'bad') +
+      card('Phone install page', s.apkweb ? s.apkweb_url : 'stopped', s.apkweb ? 'ok' : 'bad') +
+      card('Free space', (d.free_mb / 1024).toFixed(2) + ' GB of ' + (d.total_mb / 1024).toFixed(1), d.free_mb < 300 ? 'warn' : '') +
+      card('Memory free', (m.avail_mb || '?') + ' of ' + (m.total_mb || '?') + ' MB') +
+      card('webOS ATL', s.version + (upd ? ' · ' + s.latest + ' available' : ''), upd ? 'warn' : '');
+    $('#hint').textContent = (upd ? 'A new version is available: update "webOS ATL" in Homebrew Channel. ' : '') +
+      (s.payload_version && s.payload_version != s.version ? 'Applying the updated programs… ' : '') +
+      (!s.browser.installed ? 'Optional: "webOS ATL Chromium" (web browser) is in the same Homebrew Channel repository.' :
+       s.browser.ready ? 'Chromium add-on: installed.' : 'Chromium add-on: setting up (download in progress or pending).');
+    $('#b-force').style.display = s.progress.state == 'pending' ? '' : 'none';
+    prog(s.progress);
+    return s;
+  }).catch(e => { $('#cards').innerHTML = card('webOS ATL agent', 'not reachable: ' + e, 'bad'); throw e; });
+}
+function prog(p) {
+  const pct = p.total ? 100 * p.done / p.total : (p.state == 'idle' ? 0 : 5);
+  $('#upbar').style.width = pct + '%';
+  let m = p.msg || (st && st.runtime && st.runtime.ok ? 'Up to date' : '');
+  $('#upmsg').textContent = m; $('#upmsg').className = p.state == 'error' ? 'bad' : '';
+}
+function ago(t) { const s = Date.now() / 1000 - t; return s < 90 ? 'just now' : s < 5400 ? Math.round(s / 60) + ' min ago' : Math.round(s / 3600) + ' h ago'; }
+$('#b-update').onclick = () => { post('/api/update').then(() => toast('Checking for updates…')); poll(); };
+$('#b-force').onclick = async () => { if (await confirmBox('Close the running Android apps and install the new runtime now?')) { post('/api/update?force=1'); poll(); } };
+$('#b-remove').onclick = async () => {
+  if (!await confirmBox('Remove webOS ATL, every Android app installed with it and their data?')) return;
+  toast('Uninstalling…');
+  rootRun('sh ' + PAYLOAD + '/uninstall.sh', l => {}).then(rc => { toast(rc == 0 ? 'Removed. Remove "webOS ATL" in Homebrew Channel to delete this app too.' : 'Uninstall failed (rc ' + rc + ')'); setTimeout(() => location.reload(), 5000); })
+    .catch(() => post('/api/uninstall-all').then(r => toast(r.msg || r.error)));
+};
+$('#b-url').onclick = () => { const u = $('#url').value.trim(); if (!/^https?:\/\//.test(u)) return toast('Type an http(s) link to an .apk');
+  toast('Downloading and installing…'); post('/api/install-url', {url: u}).then(r => { toast(r.msg || r.error); if (r.ok) { $('#url').value = ''; loadApps(); } }); };
+$('#b-reicon').onclick = () => { toast('Reading icons…'); post('/api/reicon?id=all').then(r => toast(r.msg ? 'Icons refreshed' : (r.error || 'failed'))); };
+$('#b-atld').onclick = () => post('/api/restart?what=atld').then(r => { toast('ATL service restarted'); loadStatus(); });
+$('#b-apkweb').onclick = () => post('/api/restart?what=apkweb').then(r => { toast('APK installer restarted'); loadStatus(); });
+function poll() { let n = 0; const t = setInterval(() => api('/api/progress').then(p => { prog(p); if ((p.state == 'idle' || p.state == 'error') && ++n > 1) { clearInterval(t); loadStatus(); } }), 1000); }
+/* ---------- apps ---------- */
+function loadApps() {
+  return api('/api/apps').then(a => {
+    apps = a;
+    $('#applist').innerHTML = a.map(x => `<div class="app" tabindex="0" data-id="${x.id}"><img src="${API}/api/icon?id=${x.id}&t=${Date.now()}"><div class="t">${esc(x.title)}</div><div class="s">${x.running ? 'running · ' : ''}${(x.apk_mb + x.data_mb).toFixed(0)} MB</div></div>`).join('') || '<div class="hint">No Android apps yet.</div>';
+    $$('.app').forEach(e => e.onclick = () => openDetail(e.dataset.id));
+    if (st) $$('.ip').forEach(e => e.textContent = st.apkweb_url);
+  });
+}
+const OPTS = [
+  ['Remote arrows', 'DPAD', [['', 'Pointer'], ['keys', 'Keys (Android TV apps)']]],
+  ['Pointer drawn', 'SOFTCURSOR', [['', 'Yes'], ['0', 'No']]],
+  ['Screen density', 'ENV_ATL_DENSITY', [['', 'Default'], ['240', '240 (big)'], ['280', '280'], ['320', '320 TV'], ['400', '400'], ['480', '480 (small)']]],
+  ['Android TV mode', 'ENV_ATL_IS_TELEVISION', [['', 'Default'], ['1', 'On'], ['0', 'Off (phone UI)']]],
+  ['Hardware video decode', 'ENV_ATL_HWDEC', [['', 'Default'], ['1', 'On'], ['0', 'Off']]],
+];
+function openDetail(id) {
+  const a = apps.find(x => x.id == id); if (!a) return; detailId = id;
+  const c = a.conf || {};
+  $('#listwrap').style.display = 'none'; const d = $('#detail'); d.classList.add('on');
+  d.innerHTML = `<div class="dhead"><img src="${API}/api/icon?id=${id}&t=${Date.now()}"><div><div class="t">${esc(a.title)}</div>
+    <div class="s">${esc(c.PKG || '')} · APK ${a.apk_mb} MB · data ${a.data_mb} MB${c.LEANBACK ? ' · Android TV app' : ''}</div></div></div>
+    <div class="row"><button data-a="launch">Open</button><button data-a="stop">Stop</button><button data-a="reicon">Refresh icon</button>
+    <button data-a="log">App log</button><button data-a="clear" class="danger">Clear data</button><button data-a="uninstall" class="danger">Uninstall</button></div>` +
+    OPTS.map(([lab, key, vals]) => `<div class="row"><span class="lab">${lab}</span>${vals.map(([v, t]) => `<button data-k="${key}" data-v="${v}" class="${(c[key] || '') == v ? 'sel' : ''}">${t}</button>`).join('')}</div>`).join('') +
+    `<div class="hint">Changes apply the next time the app is opened. BACK: all apps.</div>`;
+  d.querySelectorAll('[data-k]').forEach(b => b.onclick = () => post('/api/app?id=' + id, {[b.dataset.k]: b.dataset.v}).then(r => {
+    if (r.error) return toast(r.error); a.conf = r.conf; d.querySelectorAll(`[data-k="${b.dataset.k}"]`).forEach(x => x.classList.toggle('sel', x == b)); toast('Saved');
+  }));
+  d.querySelectorAll('[data-a]').forEach(b => b.onclick = () => act(b.dataset.a, a));
+  d.querySelector('button').focus();
+}
+async function act(w, a) {
+  const id = a.id;
+  if (w == 'launch') return post('/api/launch?id=' + id);
+  if (w == 'stop') return post('/api/stop?id=' + id).then(() => toast('Stopped'));
+  if (w == 'reicon') { toast('Reading icon…'); return post('/api/reicon?id=' + id).then(r => { toast(r.msg || r.error); openDetail(id); }); }
+  if (w == 'log') { closeDetail(); show('logs', true); $('#logview').focus(); return loadLog('app', id); }
+  if (w == 'clear' && await confirmBox('Delete all data of ' + a.title + '?')) return post('/api/clear?id=' + id).then(r => toast(r.msg || r.error));
+  if (w == 'uninstall' && await confirmBox('Uninstall ' + a.title + '?')) {
+    toast('Uninstalling…'); return post('/api/uninstall?id=' + id).then(r => { toast(r.msg || r.error); closeDetail(); loadApps().then(() => focusFirst()); });
+  }
+}
+function closeDetail() { detailId = null; $('#detail').classList.remove('on'); $('#listwrap').style.display = ''; }
+/* ---------- settings ---------- */
+const SETS = [
+  ['Screen density', 'env.ATL_DENSITY', [['240', '240 (big)'], ['280', '280'], ['320', '320 TV'], ['400', '400'], ['480', '480 (small)']]],
+  ['Android TV mode', 'env.ATL_IS_TELEVISION', [['1', 'On'], ['0', 'Off (phone UI)']]],
+  ['App compilation', 'dex2oat', [['verify', 'Verify only (saves space)'], ['full', 'Full AOT (faster, more space)']]],
+  ['Hardware video decode', 'env.ATL_HWDEC', [['', 'Off unless the app turns it on'], ['1', 'On for every app']]],
+  ['One Android app at a time', 'memory.single_app', [[true, 'On (frees memory)'], [false, 'Off']]],
+  ['Stop apps in background after', 'memory.idle_stop_min', [[5, '5 min'], [10, '10 min'], [30, '30 min'], [0, 'Never']]],
+];
+const MEMDEF = {single_app: true, idle_stop_min: 10};
+function getk(s, k) {
+  if (k.startsWith('env.')) return (s.env || {})[k.slice(4)] ?? '';
+  if (k.startsWith('memory.')) { const n = k.slice(7); return (s.memory || {})[n] ?? MEMDEF[n]; }
+  return s[k];
+}
+function loadSettings() {
+  return api('/api/settings').then(s => {
+    sets = s;
+    $('#sets').innerHTML = SETS.map(([lab, key, vals], i) => `<div class="row"><span class="lab">${lab}</span>${vals.map(([v, t], j) =>
+      `<button data-i="${i}" data-j="${j}" class="${String(getk(s, key)) == String(v) ? 'sel' : ''}">${t}</button>`).join('')}</div>`).join('');
+    $$('#sets button').forEach(b => b.onclick = () => {
+      const [, key, vals] = SETS[b.dataset.i], v = vals[b.dataset.j][0];
+      const body = key.startsWith('env.') ? {env: {[key.slice(4)]: v}} : key.startsWith('memory.') ? {memory: {[key.slice(7)]: v}} : {[key]: v};
+      post('/api/settings', body).then(r => { if (r.error) return toast(r.error); sets = r;
+        $$(`#sets button[data-i="${b.dataset.i}"]`).forEach(x => x.classList.toggle('sel', x == b)); toast('Saved'); });
+    });
+  });
+}
+/* ---------- logs ---------- */
+const LOGS = [['mgr', 'Manager'], ['atld', 'App service'], ['apkweb', 'Phone page'], ['init', 'Start-up']];
+$('#logbtns').innerHTML = LOGS.map(([n, t]) => `<button data-l="${n}">${t}</button>`).join('');
+$$('#logbtns button').forEach(b => b.onclick = () => loadLog(b.dataset.l));
+function loadLog(n, id) {
+  api('/api/log?name=' + n + (id ? '&id=' + id : '')).then(t => { const v = $('#logview'); v.textContent = typeof t == 'string' ? t : JSON.stringify(t); v.scrollTop = v.scrollHeight; });
+}
+/* ---------- D-pad navigation ---------- */
+function focusables() {
+  if ($('#confirm').classList.contains('on')) return $$('#confirm button');
+  if ($('#setup').classList.contains('on')) return $$('#setup button, #setup pre');
+  return [...$$('.tab'), ...$$('.page.on button, .page.on .app, .page.on pre, .page.on input')].filter(e => e.offsetParent !== null);
+}
+function focusFirst() { const f = focusables().filter(e => !e.classList.contains('tab')); (f[0] || $('.tab.on')).focus(); }
+function move(dir) {
+  const cur = document.activeElement, all = focusables();
+  if (!cur || !all.includes(cur)) return ($('.tab.on') || all[0]).focus();
+  if (cur.tagName == 'PRE' && (dir == 'up' || dir == 'down')) { cur.scrollTop += dir == 'up' ? -300 : 300; if (!(dir == 'up' && cur.scrollTop <= 0)) return; }
+  const r = cur.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+  let best = null, bd = 1e9;
+  for (const e of all) {
+    if (e == cur) continue;
+    const q = e.getBoundingClientRect(), x = q.left + q.width / 2, y = q.top + q.height / 2, dx = x - cx, dy = y - cy;
+    let ok = dir == 'left' ? q.right <= r.left + 2 : dir == 'right' ? q.left >= r.right - 2 : dir == 'up' ? q.bottom <= r.top + 2 : q.top >= r.bottom - 2;
+    if (!ok) continue;
+    const d = (dir == 'left' || dir == 'right') ? Math.abs(dx) + 3 * Math.abs(dy) : Math.abs(dy) + 3 * Math.abs(dx);
+    if (d < bd) { bd = d; best = e; }
+  }
+  if (best) { best.focus(); best.scrollIntoView({block: 'nearest'}); }
+}
+function back() {
+  if (confirmBox.open) return confirmBox.open(false);
+  if ($('#setup').classList.contains('on')) return exitApp();
+  if (detailId) { const id = detailId; closeDetail(); const e = $(`.app[data-id="${id}"]`); return e ? e.focus() : focusFirst(); }
+  if (!document.activeElement.classList.contains('tab')) return $('.tab.on').focus();
+  exitApp();
+}
+function exitApp() { if (window.webOSSystem && webOSSystem.close) webOSSystem.close(); else if (window.PalmSystem && PalmSystem.platformBack) PalmSystem.platformBack(); else window.close(); }
+document.addEventListener('keydown', e => {
+  const k = e.keyCode;
+  const dir = {37: 'left', 38: 'up', 39: 'right', 40: 'down'}[k];
+  if (dir) { if (document.activeElement.tagName == 'INPUT' && (dir == 'left' || dir == 'right')) return; e.preventDefault(); return move(dir); }
+  if (k == 13 && document.activeElement && document.activeElement.classList.contains('app')) { e.preventDefault(); return document.activeElement.click(); }
+  if (k == 461 || k == 27 || k == 8) { e.preventDefault(); return back(); }
+});
+/* ---------- setup (first launch: the agent is not running yet) ---------- */
+function setupLog(l) { const v = $('#setuplog'); v.textContent += l + '\n'; v.scrollTop = v.scrollHeight; }
+function showSetup() { $('#setup').classList.add('on'); $('#b-install').focus(); }
+$('#b-exit').onclick = exitApp;
+$('#b-install').onclick = () => {
+  const b = $('#b-install'); b.disabled = true; $('#setuplog').textContent = '';
+  let ok = false;
+  rootRun('sh ' + PAYLOAD + '/install.sh 2>&1', l => { setupLog(l); if (/^OK /.test(l)) ok = true; })
+    .then(rc => {
+      if (!ok) { b.disabled = false; setupLog('Setup failed (rc ' + rc + ').'); return; }
+      setupLog('Starting…'); let n = 0;
+      const t = setInterval(() => loadStatus().then(() => { clearInterval(t); $('#setup').classList.remove('on'); show('status'); $('.tab.on').focus(); poll(); })
+        .catch(() => { if (++n > 30) { clearInterval(t); b.disabled = false; setupLog('The agent did not start; see /media/developer/webosatl/logs'); } }), 1000);
+    })
+    .catch(e => { b.disabled = false; setupLog('Error: ' + e.message); });
+};
+function boot(tries) {
+  loadStatus().then(s => {
+    $('.tab.on').focus();
+    if (s.payload_version && s.payload_version != s.version) post('/api/update');  // the app was just updated
+  }).catch(() => tries > 0 ? setTimeout(() => boot(tries - 1), 1000) : showSetup());
+}
+boot(2);
+setInterval(() => { if (page == 'status' && !$('#setup').classList.contains('on')) loadStatus().catch(() => {}); }, 5000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadStatus(); if (page == 'apps' && !detailId) loadApps(); } });
+</script></body></html>

@@ -1,0 +1,264 @@
+From f595e18c31a3615d1adc89aaeffec06ab69ecbc3 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 16:25:21 +0530
+Subject: [PATCH 14/42] tv: getSystemService returns an SDK-class instance for
+ every service ATL does not implement (was null), getSystemService(Class)
+ without public ctors, getSystemServiceName
+
+---
+ src/api-impl/android/app/ContextImpl.java |  24 ++-
+ src/api-impl/android/atl/ATLServices.java | 184 ++++++++++++++++++++++
+ src/api-impl/meson.build                  |   1 +
+ 3 files changed, 206 insertions(+), 3 deletions(-)
+ create mode 100644 src/api-impl/android/atl/ATLServices.java
+
+diff --git a/src/api-impl/android/app/ContextImpl.java b/src/api-impl/android/app/ContextImpl.java
+index fe60dade..00f08e4a 100644
+--- a/src/api-impl/android/app/ContextImpl.java
++++ b/src/api-impl/android/app/ContextImpl.java
+@@ -210,11 +210,17 @@ public final class ContextImpl extends Context {
+ 			case "download":
+ 				return new DownloadManager();
+ 			default:
+-				Slog.e(TAG, "!!!!!!! getSystemService: case >" + name + "< is not implemented yet");
+-				return null;
++				Object stub = android.atl.ATLServices.forName(name);
++				if (stub == null)
++					Slog.e(TAG, "!!!!!!! getSystemService: case >" + name + "< is not implemented yet");
++				return stub;
+ 		}
+ 	}
+ 
++	public String getSystemServiceName(Class<?> serviceClass) {
++		return android.atl.ATLServices.serviceNameFor(serviceClass);
++	}
++
+ 	@Override
+ 	public Object getSystemService(Class<?> serviceClass) throws InstantiationException, IllegalAccessException, InvocationTargetException {
+ 		if (serviceClass == LayoutInflater.class)
+@@ -223,7 +229,19 @@ public final class ContextImpl extends Context {
+ 			return job_scheduler;
+ 		if (serviceClass == WindowManager.class)
+ 			return new WindowManagerImpl();
+-		return serviceClass.getConstructors()[0].newInstance();
++		String name = android.atl.ATLServices.serviceNameFor(serviceClass);
++		if (name != null) {
++			Object o = getSystemService(name);
++			if (o != null && serviceClass.isInstance(o))
++				return o;
++		}
++		if (serviceClass.getConstructors().length > 0) {
++			try {
++				return serviceClass.getConstructors()[0].newInstance();
++			} catch (ReflectiveOperationException | IllegalArgumentException e) {
++			}
++		}
++		return android.atl.ATLServices.forClass(serviceClass);
+ 	}
+ 
+ 	@Override
+diff --git a/src/api-impl/android/atl/ATLServices.java b/src/api-impl/android/atl/ATLServices.java
+new file mode 100644
+index 00000000..cca97e7f
+--- /dev/null
++++ b/src/api-impl/android/atl/ATLServices.java
+@@ -0,0 +1,184 @@
++package android.atl;
++
++import android.util.Slog;
++import java.lang.reflect.Constructor;
++import java.lang.reflect.Field;
++import java.lang.reflect.Method;
++import java.util.HashMap;
++import java.util.Map;
++
++/** Fallback for system services ATL does not implement by hand: an instance of the SDK class (StubGen defaults). */
++public final class ATLServices {
++	private static final String TAG = "ATLServices";
++	private static final Map<String, String> names = new HashMap<>();
++	private static final Map<String, Object> cache = new HashMap<>();
++	private static Object unsafe;
++	private static Method allocateInstance;
++
++	static {
++		Map<String, String> m = names;
++		m.put("accessibility", "android.view.accessibility.AccessibilityManager");
++		m.put("account", "android.accounts.AccountManager");
++		m.put("activity", "android.app.ActivityManager");
++		m.put("alarm", "android.app.AlarmManager");
++		m.put("app_hibernation", "android.apphibernation.AppHibernationManager");
++		m.put("appops", "android.app.AppOpsManager");
++		m.put("appwidget", "android.appwidget.AppWidgetManager");
++		m.put("audio", "android.media.AudioManager");
++		m.put("autofill", "android.view.autofill.AutofillManager");
++		m.put("batterymanager", "android.os.BatteryManager");
++		m.put("biometric", "android.hardware.biometrics.BiometricManager");
++		m.put("blob_store", "android.app.blob.BlobStoreManager");
++		m.put("bluetooth", "android.bluetooth.BluetoothManager");
++		m.put("camera", "android.hardware.camera2.CameraManager");
++		m.put("captioning", "android.view.accessibility.CaptioningManager");
++		m.put("carrier_config", "android.telephony.CarrierConfigManager");
++		m.put("clipboard", "android.content.ClipboardManager");
++		m.put("companiondevice", "android.companion.CompanionDeviceManager");
++		m.put("connectivity", "android.net.ConnectivityManager");
++		m.put("consumer_ir", "android.hardware.ConsumerIrManager");
++		m.put("contexthub", "android.hardware.location.ContextHubManager");
++		m.put("credential", "android.credentials.CredentialManager");
++		m.put("crossprofileapps", "android.content.pm.CrossProfileApps");
++		m.put("device_policy", "android.app.admin.DevicePolicyManager");
++		m.put("display", "android.hardware.display.DisplayManager");
++		m.put("domain_verification", "android.content.pm.verify.domain.DomainVerificationManager");
++		m.put("download", "android.app.DownloadManager");
++		m.put("dropbox", "android.os.DropBoxManager");
++		m.put("euicc", "android.telephony.euicc.EuiccManager");
++		m.put("file_integrity", "android.security.FileIntegrityManager");
++		m.put("fingerprint", "android.hardware.fingerprint.FingerprintManager");
++		m.put("game", "android.app.GameManager");
++		m.put("grammatical_inflection", "android.app.GrammaticalInflectionManager");
++		m.put("hardware_properties", "android.os.HardwarePropertiesManager");
++		m.put("health_connect", "android.health.connect.HealthConnectManager");
++		m.put("input", "android.hardware.input.InputManager");
++		m.put("input_method", "android.view.inputmethod.InputMethodManager");
++		m.put("ipsec", "android.net.IpSecManager");
++		m.put("jobscheduler", "android.app.job.JobScheduler");
++		m.put("keyguard", "android.app.KeyguardManager");
++		m.put("keystore", "android.security.keystore.KeyStoreManager");
++		m.put("launcherapps", "android.content.pm.LauncherApps");
++		m.put("layout_inflater", "android.view.LayoutInflater");
++		m.put("locale", "android.app.LocaleManager");
++		m.put("location", "android.location.LocationManager");
++		m.put("media_communication", "android.media.MediaCommunicationManager");
++		m.put("media_metrics", "android.media.metrics.MediaMetricsManager");
++		m.put("media_projection", "android.media.projection.MediaProjectionManager");
++		m.put("media_router", "android.media.MediaRouter");
++		m.put("media_session", "android.media.session.MediaSessionManager");
++		m.put("midi", "android.media.midi.MidiManager");
++		m.put("netstats", "android.app.usage.NetworkStatsManager");
++		m.put("nfc", "android.nfc.NfcManager");
++		m.put("notification", "android.app.NotificationManager");
++		m.put("nsd", "android.net.nsd.NsdManager");
++		m.put("overlay", "android.content.om.OverlayManager");
++		m.put("people", "android.app.people.PeopleManager");
++		m.put("performance_hint", "android.os.PerformanceHintManager");
++		m.put("persistent_data_block", "android.service.persistentdata.PersistentDataBlockManager");
++		m.put("phone", "android.telephony.TelephonyManager");
++		m.put("power", "android.os.PowerManager");
++		m.put("print", "android.print.PrintManager");
++		m.put("restrictions", "android.content.RestrictionsManager");
++		m.put("role", "android.app.role.RoleManager");
++		m.put("search", "android.app.SearchManager");
++		m.put("security_state", "android.os.SecurityStateManager");
++		m.put("sensor", "android.hardware.SensorManager");
++		m.put("shortcut", "android.content.pm.ShortcutManager");
++		m.put("statusbar", "android.app.StatusBarManager");
++		m.put("storage", "android.os.storage.StorageManager");
++		m.put("storagestats", "android.app.usage.StorageStatsManager");
++		m.put("system_health", "android.os.health.SystemHealthManager");
++		m.put("telecom", "android.telecom.TelecomManager");
++		m.put("telephony_subscription_service", "android.telephony.SubscriptionManager");
++		m.put("textclassification", "android.view.textclassifier.TextClassificationManager");
++		m.put("textservices", "android.view.textservice.TextServicesManager");
++		m.put("translation", "android.view.translation.TranslationManager");
++		m.put("tv_input", "android.media.tv.TvInputManager");
++		m.put("tv_interactive_app", "android.media.tv.interactive.TvInteractiveAppManager");
++		m.put("uimode", "android.app.UiModeManager");
++		m.put("usagestats", "android.app.usage.UsageStatsManager");
++		m.put("usb", "android.hardware.usb.UsbManager");
++		m.put("user", "android.os.UserManager");
++		m.put("uwb", "android.uwb.UwbManager");
++		m.put("vibrator", "android.os.Vibrator");
++		m.put("vibrator_manager", "android.os.VibratorManager");
++		m.put("virtualdevice", "android.companion.virtual.VirtualDeviceManager");
++		m.put("vpn_management", "android.net.VpnManager");
++		m.put("wallpaper", "android.app.WallpaperManager");
++		m.put("wearable_sensing", "android.app.wearable.WearableSensingManager");
++		m.put("wifi", "android.net.wifi.WifiManager");
++		m.put("wifiaware", "android.net.wifi.aware.WifiAwareManager");
++		m.put("wifip2p", "android.net.wifi.p2p.WifiP2pManager");
++		m.put("wifirtt", "android.net.wifi.rtt.WifiRttManager");
++		m.put("window", "android.view.WindowManager");
++	}
++
++	private ATLServices() {}
++
++	public static String classNameFor(String service) {
++		return names.get(service);
++	}
++
++	public static String serviceNameFor(Class<?> cls) {
++		for (Map.Entry<String, String> e : names.entrySet())
++			if (e.getValue().equals(cls.getName()))
++				return e.getKey();
++		return null;
++	}
++
++	public static synchronized Object forName(String service) {
++		String cn = names.get(service);
++		if (cn == null)
++			return null;
++		Object o = cache.get(cn);
++		if (o != null)
++			return o;
++		try {
++			o = forClass(Class.forName(cn));
++		} catch (ClassNotFoundException e) {
++			Slog.w(TAG, "no class " + cn + " for service " + service);
++			return null;
++		}
++		return o;
++	}
++
++	public static synchronized Object forClass(Class<?> cls) {
++		Object o = cache.get(cls.getName());
++		if (o != null)
++			return o;
++		try {
++			Constructor<?> c = cls.getDeclaredConstructor();
++			c.setAccessible(true);
++			o = c.newInstance();
++		} catch (Throwable t) {
++			o = allocate(cls);
++		}
++		if (o != null) {
++			cache.put(cls.getName(), o);
++			Slog.i(TAG, "stub system service " + cls.getName());
++		}
++		return o;
++	}
++
++	private static Object allocate(Class<?> cls) {
++		try {
++			if (allocateInstance == null) {
++				Class<?> u = Class.forName("sun.misc.Unsafe");
++				Field f;
++				try {
++					f = u.getDeclaredField("theUnsafe");
++				} catch (NoSuchFieldException e) {
++					f = u.getDeclaredField("THE_ONE");
++				}
++				f.setAccessible(true);
++				unsafe = f.get(null);
++				allocateInstance = u.getMethod("allocateInstance", Class.class);
++			}
++			return allocateInstance.invoke(unsafe, cls);
++		} catch (Throwable t) {
++			Slog.w(TAG, "cannot instantiate " + cls.getName() + ": " + t);
++			return null;
++		}
++	}
++}
+diff --git a/src/api-impl/meson.build b/src/api-impl/meson.build
+index a3a82361..c5b0ee0d 100644
+--- a/src/api-impl/meson.build
++++ b/src/api-impl/meson.build
+@@ -94,6 +94,7 @@ srcs = [
+ 	'android/atl/ATLMediaContentProvider.java',
+ 	'android/atl/ATLPaths.java',
+ 	'android/atl/ATLProvider.java',
++	'android/atl/ATLServices.java',
+ 	'android/atl/ATLSigHelper.java',
+ 	'android/atl/ATLToggles.java',
+ 	'android/atl/ATLTv.java',
+-- 
+2.43.0
+

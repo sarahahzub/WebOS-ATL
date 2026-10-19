@@ -1,0 +1,248 @@
+From d6923152f579b5f65458b22865cb2174c3605fbb Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 16:15:54 +0530
+Subject: [PATCH 11/42] tv: Android TV device profile (ATL_IS_TELEVISION):
+ uiMode television, D-pad config, TV features, LEANBACK_LAUNCHER, Build props,
+ ATL_PROPS, ATL_DEFAULT_SDK_INT, no activity animations
+
+---
+ .../content/android_content_Context.c         |  6 +-
+ src/api-impl/android/app/Activity.java        | 16 ++++-
+ src/api-impl/android/atl/ATLTv.java           | 60 +++++++++++++++++++
+ src/api-impl/android/content/Context.java     |  1 +
+ .../android/content/pm/PackageManager.java    |  3 +
+ src/api-impl/android/os/Build.java            |  9 ++-
+ src/api-impl/android/os/SystemProperties.java | 16 +++++
+ src/api-impl/meson.build                      |  1 +
+ src/main-executable/main.c                    |  3 +-
+ 9 files changed, 109 insertions(+), 6 deletions(-)
+ create mode 100644 src/api-impl/android/atl/ATLTv.java
+
+diff --git a/src/api-impl-jni/content/android_content_Context.c b/src/api-impl-jni/content/android_content_Context.c
+index d1205b82..fea21fab 100644
+--- a/src/api-impl-jni/content/android_content_Context.c
++++ b/src/api-impl-jni/content/android_content_Context.c
+@@ -47,11 +47,11 @@ static void settings_changed_cb(XdpSettings *xdp_settings, gchar *namestpace, gc
+ 			configuration = _GET_STATIC_OBJ_FIELD(handle_cache.context.class, "sys_config", "Landroid/content/res/Configuration;");
+ 		}
+ 		if (color_sheme == 1) // Prefer dark appearance
+-			_SET_INT_FIELD(configuration, "uiMode", /*UI_MODE_NIGHT_YES*/ 0x20);
++			_SET_INT_FIELD(configuration, "uiMode", (_GET_INT_FIELD(configuration, "uiMode") & 0x0f) | /*UI_MODE_NIGHT_YES*/ 0x20);
+ 		else if (color_sheme == 2) // Prefer light appearance
+-			_SET_INT_FIELD(configuration, "uiMode", /*UI_MODE_NIGHT_NO*/ 0x10);
++			_SET_INT_FIELD(configuration, "uiMode", (_GET_INT_FIELD(configuration, "uiMode") & 0x0f) | /*UI_MODE_NIGHT_NO*/ 0x10);
+ 		else // No preference
+-			_SET_INT_FIELD(configuration, "uiMode", /*UI_MODE_NIGHT_UNDEFINED*/ 0x00);
++			_SET_INT_FIELD(configuration, "uiMode", (_GET_INT_FIELD(configuration, "uiMode") & 0x0f) | /*UI_MODE_NIGHT_UNDEFINED*/ 0x00);
+ 	}
+ }
+ 
+diff --git a/src/api-impl/android/app/Activity.java b/src/api-impl/android/app/Activity.java
+index cefdfe03..42e3fa8f 100644
+--- a/src/api-impl/android/app/Activity.java
++++ b/src/api-impl/android/app/Activity.java
+@@ -70,6 +70,20 @@ public class Activity extends ContextThemeWrapper implements Window.Callback, La
+ 	 */
+ 	private static Activity createMainActivity(String className, long native_window, String uriString) throws ReflectiveOperationException {
+ 		Uri uri = uriString != null ? Uri.parse(uriString) : null;
++		if (className == null && uri == null && android.atl.ATLTv.TV) {
++			for (PackageParser.Activity activity : ATLLoadedApp.getPrimaryApplication().pkg.activities) {
++				if (!activity.info.enabled)
++					continue;
++				for (PackageParser.IntentInfo intent : activity.intents) {
++					if (intent.hasCategory("android.intent.category.LEANBACK_LAUNCHER") && intent.hasAction("android.intent.action.MAIN")) {
++						className = activity.info.targetActivity != null ? activity.info.targetActivity : activity.className;
++						break;
++					}
++				}
++				if (className != null)
++					break;
++			}
++		}
+ 		if (className == null) {
+ 			for (PackageParser.Activity activity : ATLLoadedApp.getPrimaryApplication().pkg.activities) {
+ 				if (!activity.info.enabled)
+@@ -87,7 +101,7 @@ public class Activity extends ContextThemeWrapper implements Window.Callback, La
+ 				if (done)
+ 					break;
+ 			}
+-		} else {
++		} else if (className.indexOf('/') >= 0) {
+ 			className = className.replace('/', '.');
+ 		}
+ 		if (className == null) {
+diff --git a/src/api-impl/android/atl/ATLTv.java b/src/api-impl/android/atl/ATLTv.java
+new file mode 100644
+index 00000000..897dc6e7
+--- /dev/null
++++ b/src/api-impl/android/atl/ATLTv.java
+@@ -0,0 +1,60 @@
++package android.atl;
++
++import android.content.res.Configuration;
++
++/** Android TV device profile, enabled with ATL_IS_TELEVISION (any value). */
++public final class ATLTv {
++	public static final boolean TV = System.getenv("ATL_IS_TELEVISION") != null;
++
++	private ATLTv() {}
++
++	public static void applyConfig(Configuration c) {
++		if (!TV || c == null)
++			return;
++		int night = c.uiMode & Configuration.UI_MODE_NIGHT_MASK;
++		if (night == Configuration.UI_MODE_NIGHT_UNDEFINED && !"0".equals(System.getenv("ATL_TV_NIGHT")))
++			night = Configuration.UI_MODE_NIGHT_YES; // TV UIs are dark; Android TV reports night mode
++		c.uiMode = Configuration.UI_MODE_TYPE_TELEVISION | night;
++		c.touchscreen = Configuration.TOUCHSCREEN_NOTOUCH;
++		c.navigation = Configuration.NAVIGATION_DPAD;
++		c.navigationHidden = Configuration.NAVIGATIONHIDDEN_NO;
++		c.keyboard = Configuration.KEYBOARD_NOKEYS;
++		c.keyboardHidden = Configuration.KEYBOARDHIDDEN_YES;
++		c.hardKeyboardHidden = Configuration.HARDKEYBOARDHIDDEN_YES;
++	}
++
++	/** null = not decided here, use ATL's default */
++	public static Boolean hasFeature(String name) {
++		if (!TV)
++			return null;
++		switch (name) {
++			case "android.software.leanback":
++			case "android.hardware.type.television":
++			case "android.software.live_tv":
++			case "android.hardware.wifi":
++			case "android.hardware.ethernet":
++			case "android.hardware.audio.output":
++			case "android.hardware.screen.landscape":
++			case "android.software.webview":
++			case "android.software.app_widgets":
++			case "android.hardware.hdmi.cec":
++				return Boolean.TRUE;
++			case "android.hardware.touchscreen":
++			case "android.hardware.touchscreen.multitouch":
++			case "android.hardware.touchscreen.multitouch.distinct":
++			case "android.hardware.touchscreen.multitouch.jazzhand":
++			case "android.hardware.faketouch":
++			case "android.hardware.screen.portrait":
++			case "android.hardware.telephony":
++			case "android.hardware.camera":
++			case "android.hardware.camera.any":
++			case "android.hardware.location.gps":
++			case "android.hardware.sensor.accelerometer":
++			case "android.hardware.microphone":
++			case "android.software.leanback_only":
++				return Boolean.FALSE;
++			default:
++				return null;
++		}
++	}
++}
+diff --git a/src/api-impl/android/content/Context.java b/src/api-impl/android/content/Context.java
+index ca421423..f90b9367 100644
+--- a/src/api-impl/android/content/Context.java
++++ b/src/api-impl/android/content/Context.java
+@@ -112,6 +112,7 @@ public abstract class Context {
+ 	static {
+ 		sys_config = new Configuration();
+ 		native_updateConfig(sys_config);
++		android.atl.ATLTv.applyConfig(sys_config);
+ 		ATLLoadedApp primary_application = ATLLoadedApp.getPrimaryApplication();
+ 
+ 		ApplicationInfo application_info = primary_application.pkg.applicationInfo;
+diff --git a/src/api-impl/android/content/pm/PackageManager.java b/src/api-impl/android/content/pm/PackageManager.java
+index 82e54538..1fb215ed 100644
+--- a/src/api-impl/android/content/pm/PackageManager.java
++++ b/src/api-impl/android/content/pm/PackageManager.java
+@@ -2185,6 +2185,9 @@ public class PackageManager {
+ 	 * false.
+ 	 */
+ 	public boolean hasSystemFeature(String name) {
++		Boolean tv = android.atl.ATLTv.hasFeature(name);
++		if (tv != null)
++			return tv;
+ 		switch (name) {
+ 			case "android.hardware.touchscreen.multitouch.distinct":
+ 				return true;
+diff --git a/src/api-impl/android/os/Build.java b/src/api-impl/android/os/Build.java
+index 6b182daf..9725f2d7 100644
+--- a/src/api-impl/android/os/Build.java
++++ b/src/api-impl/android/os/Build.java
+@@ -69,7 +69,7 @@ public class Build {
+ 	/**
+ 	 * The manufacturer of the product/hardware.
+ 	 */
+-	public static final String MANUFACTURER = "HTC" /* HTC picked at random; getString("ro.product.manufacturer")*/;
++	public static final String MANUFACTURER = SystemProperties.get("ro.product.manufacturer", "HTC"); /* upstream default: HTC, picked at random */
+ 
+ 	/**
+ 	 * The brand (e.g., carrier) the software is customized for, if any.
+@@ -138,6 +138,13 @@ public class Build {
+ 					SDK_INT_tmp = EarlyPackageParser.parseMinSdkInt(mainApk, SDK_INT_tmp);
+ 					// Always ensure the SDK int is at least gingerbread for older applications.
+ 					SDK_INT_tmp = Math.max(SDK_INT_tmp, Build.VERSION_CODES.GINGERBREAD);
++					String def = System.getenv("ATL_DEFAULT_SDK_INT"); // pretend at least this Android version
++					if (def != null) {
++						try {
++							SDK_INT_tmp = Math.max(SDK_INT_tmp, Integer.parseInt(def.trim()));
++						} catch (NumberFormatException e) {
++						}
++					}
+ 				}
+ 			}
+ 
+diff --git a/src/api-impl/android/os/SystemProperties.java b/src/api-impl/android/os/SystemProperties.java
+index 814bdff5..2ff53ab9 100644
+--- a/src/api-impl/android/os/SystemProperties.java
++++ b/src/api-impl/android/os/SystemProperties.java
+@@ -13,6 +13,22 @@ public class SystemProperties {
+ 		properties.put("ro.product.brand", "google");
+ 		properties.put("ro.build.tags", "release-keys");
+ 		properties.put("ro.build.type", "user");
++		if (System.getenv("ATL_IS_TELEVISION") != null) {
++			properties.put("ro.product.manufacturer", "LGE");
++			properties.put("ro.product.brand", "lge");
++			properties.put("ro.product.model", "LG webOS TV");
++			properties.put("ro.product.device", "webos_tv");
++			properties.put("ro.product.name", "webos_tv");
++			properties.put("ro.hardware", "webos");
++			properties.put("ro.build.characteristics", "tv");
++		}
++		String extra = System.getenv("ATL_PROPS"); // "key=value;key=value"
++		if (extra != null)
++			for (String kv : extra.split(";")) {
++				int i = kv.indexOf('=');
++				if (i > 0)
++					properties.put(kv.substring(0, i).trim(), kv.substring(i + 1));
++			}
+ 		// TODO how to actually get the system's supported abis?
+ 		if (System.getProperty("os.arch").equals("x86_64")) {
+ 			properties.put("ro.product.cpu.abi", "x86_64");
+diff --git a/src/api-impl/meson.build b/src/api-impl/meson.build
+index 40e6c166..a3a82361 100644
+--- a/src/api-impl/meson.build
++++ b/src/api-impl/meson.build
+@@ -96,6 +96,7 @@ srcs = [
+ 	'android/atl/ATLProvider.java',
+ 	'android/atl/ATLSigHelper.java',
+ 	'android/atl/ATLToggles.java',
++	'android/atl/ATLTv.java',
+ 	'android/atl/EarlyPackageParser.java',
+ 	'android/atl/GskCanvas.java',
+ 	'android/atl/GVariantBuilderParcel.java',
+diff --git a/src/main-executable/main.c b/src/main-executable/main.c
+index 6cda32b4..f47421a0 100644
+--- a/src/main-executable/main.c
++++ b/src/main-executable/main.c
+@@ -478,7 +478,8 @@ static void open(GtkApplication *app, GFile **files, gint nfiles, const gchar *h
+ 
+ 	window = gtk_application_window_new(app);
+ 	GtkWidget *stack = gtk_stack_new();
+-	gtk_stack_set_transition_type(GTK_STACK(stack), GTK_STACK_TRANSITION_TYPE_SLIDE_LEFT_RIGHT);
++	gtk_stack_set_transition_type(GTK_STACK(stack), (getenv("ATL_NO_ANIMATIONS") || getenv("ATL_IS_TELEVISION")) ? GTK_STACK_TRANSITION_TYPE_NONE
++	                                                                                                             : GTK_STACK_TRANSITION_TYPE_SLIDE_LEFT_RIGHT);
+ 	gtk_window_set_child(GTK_WINDOW(window), stack);
+ 
+ 	const char *disable_decoration_env = getenv("ATL_DISABLE_WINDOW_DECORATIONS");
+-- 
+2.43.0
+

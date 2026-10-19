@@ -1,0 +1,371 @@
+From fc2be4d5ab4ad9d4ea626cdc6841b50f35e85df5 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 15:32:44 +0530
+Subject: [PATCH 24/42] tv: TransitionInflater returns real transitions,
+ working Scene/TransitionManager (SmartTube leanback NPE on start)
+
+---
+ src/api-impl/android/transition/Scene.java    | 65 ++++++++++++++
+ .../android/transition/Transition.java        | 89 ++++++++++++++++++-
+ .../transition/TransitionInflater.java        |  8 +-
+ .../android/transition/TransitionManager.java | 56 ++++++++++++
+ .../android/transition/TransitionSet.java     | 39 ++++++++
+ src/api-impl/meson.build                      |  2 +
+ 6 files changed, 255 insertions(+), 4 deletions(-)
+ create mode 100644 src/api-impl/android/transition/Scene.java
+ create mode 100644 src/api-impl/android/transition/TransitionManager.java
+
+diff --git a/src/api-impl/android/transition/Scene.java b/src/api-impl/android/transition/Scene.java
+new file mode 100644
+index 00000000..2fa37ac9
+--- /dev/null
++++ b/src/api-impl/android/transition/Scene.java
+@@ -0,0 +1,65 @@
++package android.transition;
++
++import android.content.Context;
++import android.view.LayoutInflater;
++import android.view.View;
++import android.view.ViewGroup;
++
++public final class Scene {
++
++	private ViewGroup sceneRoot;
++	private View layout;
++	private int layoutId = -1;
++	private Context context;
++	private Runnable enterAction, exitAction;
++
++	public Scene(ViewGroup sceneRoot) {
++		this.sceneRoot = sceneRoot;
++	}
++
++	public Scene(ViewGroup sceneRoot, View layout) {
++		this.sceneRoot = sceneRoot;
++		this.layout = layout;
++	}
++
++	private Scene(ViewGroup sceneRoot, int layoutId, Context context) {
++		this.sceneRoot = sceneRoot;
++		this.layoutId = layoutId;
++		this.context = context;
++	}
++
++	public static Scene getSceneForLayout(ViewGroup sceneRoot, int layoutId, Context context) {
++		return new Scene(sceneRoot, layoutId, context);
++	}
++
++	public ViewGroup getSceneRoot() {
++		return sceneRoot;
++	}
++
++	public void setEnterAction(Runnable action) {
++		enterAction = action;
++	}
++
++	public void setExitAction(Runnable action) {
++		exitAction = action;
++	}
++
++	public void enter() {
++		if (sceneRoot != null && (layoutId > 0 || layout != null)) {
++			sceneRoot.removeAllViews();
++			if (layoutId > 0)
++				LayoutInflater.from(context != null ? context : sceneRoot.getContext()).inflate(layoutId, sceneRoot);
++			else
++				sceneRoot.addView(layout);
++		}
++		if (enterAction != null)
++			enterAction.run();
++		if (sceneRoot != null)
++			TransitionManager.current.put(sceneRoot, this);
++	}
++
++	public void exit() {
++		if (sceneRoot != null && TransitionManager.current.get(sceneRoot) == this && exitAction != null)
++			exitAction.run();
++	}
++}
+diff --git a/src/api-impl/android/transition/Transition.java b/src/api-impl/android/transition/Transition.java
+index 3f53cf96..e2af7153 100644
+--- a/src/api-impl/android/transition/Transition.java
++++ b/src/api-impl/android/transition/Transition.java
+@@ -2,23 +2,75 @@ package android.transition;
+ 
+ import android.animation.TimeInterpolator;
+ import android.view.View;
++import java.util.ArrayList;
+ 
+-public class Transition {
++public class Transition implements Cloneable {
+ 
+-	public interface TransitionListener {}
++	public interface TransitionListener {
++		default void onTransitionStart(Transition transition) {}
++		default void onTransitionEnd(Transition transition) {}
++		default void onTransitionCancel(Transition transition) {}
++		default void onTransitionPause(Transition transition) {}
++		default void onTransitionResume(Transition transition) {}
++	}
++
++	ArrayList<TransitionListener> listeners = new ArrayList<>();
++	private long duration = -1;
++	private long startDelay = -1;
++	private TimeInterpolator interpolator;
+ 
+ 	public Transition clone() {
+-		return new Transition();
++		Transition t;
++		try {
++			t = (Transition)super.clone();
++		} catch (CloneNotSupportedException e) {
++			t = new Transition();
++		}
++		t.listeners = new ArrayList<>(listeners);
++		return t;
+ 	}
+ 
+ 	public Transition addListener(TransitionListener listener) {
++		if (listener != null)
++			listeners.add(listener);
++		return this;
++	}
++
++	public Transition removeListener(TransitionListener listener) {
++		listeners.remove(listener);
+ 		return this;
+ 	}
+ 
++	void dispatchStart() {
++		for (TransitionListener l : new ArrayList<>(listeners))
++			l.onTransitionStart(this);
++	}
++
++	void dispatchEnd() {
++		for (TransitionListener l : new ArrayList<>(listeners))
++			l.onTransitionEnd(this);
++	}
++
+ 	public Transition excludeTarget(int targetId, boolean exclude) {
+ 		return this;
+ 	}
+ 
++	public Transition excludeTarget(View target, boolean exclude) {
++		return this;
++	}
++
++	public Transition excludeTarget(Class type, boolean exclude) {
++		return this;
++	}
++
++	public Transition excludeChildren(int targetId, boolean exclude) {
++		return this;
++	}
++
++	public Transition addTarget(int targetId) {
++		return this;
++	}
++
+ 	public Transition addTarget(View target) {
+ 		return this;
+ 	}
+@@ -27,11 +79,42 @@ public class Transition {
+ 		return this;
+ 	}
+ 
++	public Transition addTarget(Class targetType) {
++		return this;
++	}
++
++	public Transition removeTarget(int targetId) {
++		return this;
++	}
++
++	public Transition removeTarget(View target) {
++		return this;
++	}
++
+ 	public Transition setDuration(long duration) {
++		this.duration = duration;
+ 		return this;
+ 	}
+ 
++	public long getDuration() {
++		return duration;
++	}
++
++	public Transition setStartDelay(long startDelay) {
++		this.startDelay = startDelay;
++		return this;
++	}
++
++	public long getStartDelay() {
++		return startDelay;
++	}
++
+ 	public Transition setInterpolator(TimeInterpolator interpolator) {
++		this.interpolator = interpolator;
+ 		return this;
+ 	}
++
++	public TimeInterpolator getInterpolator() {
++		return interpolator;
++	}
+ }
+diff --git a/src/api-impl/android/transition/TransitionInflater.java b/src/api-impl/android/transition/TransitionInflater.java
+index 204c8b5f..adcad874 100644
+--- a/src/api-impl/android/transition/TransitionInflater.java
++++ b/src/api-impl/android/transition/TransitionInflater.java
+@@ -1,6 +1,7 @@
+ package android.transition;
+ 
+ import android.content.Context;
++import android.view.ViewGroup;
+ 
+ public class TransitionInflater {
+ 
+@@ -8,7 +9,12 @@ public class TransitionInflater {
+ 		return new TransitionInflater();
+ 	}
+ 
++	// no XML parsing: ATL does not animate transitions, but callers expect a transition (leanback adds listeners)
+ 	public Transition inflateTransition(int resourceId) {
+-		return null;
++		return new TransitionSet();
++	}
++
++	public TransitionManager inflateTransitionManager(int resource, ViewGroup sceneRoot) {
++		return new TransitionManager();
+ 	}
+ }
+diff --git a/src/api-impl/android/transition/TransitionManager.java b/src/api-impl/android/transition/TransitionManager.java
+new file mode 100644
+index 00000000..a7636497
+--- /dev/null
++++ b/src/api-impl/android/transition/TransitionManager.java
+@@ -0,0 +1,56 @@
++package android.transition;
++
++import android.os.Handler;
++import android.os.Looper;
++import android.view.ViewGroup;
++import java.util.HashMap;
++import java.util.WeakHashMap;
++
++// no animations: scene changes are applied at once, listeners still see start and (on the next loop turn) end
++public class TransitionManager {
++
++	static final WeakHashMap<ViewGroup, Scene> current = new WeakHashMap<>();
++	private final HashMap<Scene, Transition> sceneTransitions = new HashMap<>();
++
++	public static void go(Scene scene) {
++		go(scene, null);
++	}
++
++	public static void go(Scene scene, Transition transition) {
++		if (scene == null)
++			return;
++		ViewGroup root = scene.getSceneRoot();
++		Scene old = root != null ? current.get(root) : null;
++		if (old != null)
++			old.exit();
++		if (transition != null)
++			transition.dispatchStart();
++		scene.enter();
++		if (transition != null) {
++			final Transition t = transition;
++			new Handler(Looper.getMainLooper()).post(new Runnable() {
++				public void run() {
++					t.dispatchEnd();
++				}
++			});
++		}
++	}
++
++	public static void beginDelayedTransition(ViewGroup sceneRoot) {}
++
++	public static void beginDelayedTransition(ViewGroup sceneRoot, Transition transition) {}
++
++	public static void endTransitions(ViewGroup sceneRoot) {}
++
++	public void setTransition(Scene scene, Transition transition) {
++		sceneTransitions.put(scene, transition);
++	}
++
++	public void setTransition(Scene fromScene, Scene toScene, Transition transition) {
++		sceneTransitions.put(toScene, transition);
++	}
++
++	public void transitionTo(Scene scene) {
++		go(scene, sceneTransitions.get(scene));
++	}
++}
+diff --git a/src/api-impl/android/transition/TransitionSet.java b/src/api-impl/android/transition/TransitionSet.java
+index 52d78f9a..12175976 100644
+--- a/src/api-impl/android/transition/TransitionSet.java
++++ b/src/api-impl/android/transition/TransitionSet.java
+@@ -1,8 +1,47 @@
+ package android.transition;
+ 
++import java.util.ArrayList;
++
+ public class TransitionSet extends Transition {
+ 
++	public static final int ORDERING_TOGETHER = 0;
++	public static final int ORDERING_SEQUENTIAL = 1;
++
++	private ArrayList<Transition> transitions = new ArrayList<>();
++	private int ordering = ORDERING_TOGETHER;
++
+ 	public TransitionSet addTransition(Transition transition) {
++		if (transition != null)
++			transitions.add(transition);
+ 		return this;
+ 	}
++
++	public TransitionSet removeTransition(Transition transition) {
++		transitions.remove(transition);
++		return this;
++	}
++
++	public int getTransitionCount() {
++		return transitions.size();
++	}
++
++	public Transition getTransitionAt(int index) {
++		return index < 0 || index >= transitions.size() ? null : transitions.get(index);
++	}
++
++	public TransitionSet setOrdering(int ordering) {
++		this.ordering = ordering;
++		return this;
++	}
++
++	public int getOrdering() {
++		return ordering;
++	}
++
++	@Override
++	public TransitionSet clone() {
++		TransitionSet t = (TransitionSet)super.clone();
++		t.transitions = new ArrayList<>(transitions);
++		return t;
++	}
+ }
+diff --git a/src/api-impl/meson.build b/src/api-impl/meson.build
+index c5b0ee0d..e7f0275e 100644
+--- a/src/api-impl/meson.build
++++ b/src/api-impl/meson.build
+@@ -559,7 +559,9 @@ srcs = [
+ 	'android/transition/Fade.java',
+ 	'android/transition/Slide.java',
+ 	'android/transition/Transition.java',
++	'android/transition/Scene.java',
+ 	'android/transition/TransitionInflater.java',
++	'android/transition/TransitionManager.java',
+ 	'android/transition/TransitionSet.java',
+ 	'android/transition/Visibility.java',
+ 	'android/util/AndroidException.java',
+-- 
+2.43.0
+

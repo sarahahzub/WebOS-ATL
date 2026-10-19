@@ -1,0 +1,97 @@
+From 5b7b3b264c18cc3085c233e75f5a107ddd986355 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 23:12:12 +0530
+Subject: [PATCH 39/42] tv: ViewTreeObserver listeners never exit(1):
+ unrealized dialog windows use the main window frame clock; bad state only
+ warns (CloudStream died opening a plugin BottomSheet)
+
+---
+ .../views/android_view_ViewTreeObserver.c     | 39 ++++++++++++++++---
+ 1 file changed, 33 insertions(+), 6 deletions(-)
+
+diff --git a/src/api-impl-jni/views/android_view_ViewTreeObserver.c b/src/api-impl-jni/views/android_view_ViewTreeObserver.c
+index d74c620a..e2162e00 100644
+--- a/src/api-impl-jni/views/android_view_ViewTreeObserver.c
++++ b/src/api-impl-jni/views/android_view_ViewTreeObserver.c
+@@ -28,6 +28,27 @@ extern GtkWidget *window;
+ 
+ void _gdb_force_java_stack_trace(void);
+ 
++/* tv: a not-yet-realized (dialog) window has no frame clock; fall back to the main window's clock */
++static GdkFrameClock *vto_clock(GtkWidget *w)
++{
++	GdkFrameClock *c = w ? gtk_widget_get_frame_clock(w) : NULL;
++	if (!c && window)
++		c = gtk_widget_get_frame_clock(window);
++	return c;
++}
++
++static void vto_disconnect(GtkWidget *w, gulong h)
++{
++	GdkFrameClock *c = w ? gtk_widget_get_frame_clock(w) : NULL;
++	if (c && g_signal_handler_is_connected(c, h)) {
++		g_signal_handler_disconnect(c, h);
++		return;
++	}
++	c = window ? gtk_widget_get_frame_clock(window) : NULL;
++	if (c && g_signal_handler_is_connected(c, h))
++		g_signal_handler_disconnect(c, h);
++}
++
+ JNIEXPORT void JNICALL Java_android_view_ViewTreeObserver_native_1set_1have_1global_1layout_1listeners(JNIEnv *env, jobject this, jboolean have_listeners)
+ {
+ 	GtkWidget *window = _PTR(_GET_LONG_FIELD(this, "window"));
+@@ -38,18 +59,21 @@ JNIEXPORT void JNICALL Java_android_view_ViewTreeObserver_native_1set_1have_1glo
+ 	}
+ 
+ 	gulong signal_handle = _GET_LONG_FIELD(this, "onGlobalLayout_signal_handle");
+-	GdkFrameClock *clock = gtk_widget_get_frame_clock(window);
++	GdkFrameClock *clock = vto_clock(window);
+ 
+ 	if (have_listeners && !signal_handle) {
++		if (!clock) {
++			fprintf(stderr, "ViewTreeObserver: no frame clock yet, global_1layout listener not hooked\n");
++			return;
++		}
+ 		/* GTKs own handler is always the first, so our handler gets called after all widgets have been measured and allocated */
+ 		signal_handle = g_signal_connect(G_OBJECT(clock), "layout", G_CALLBACK(on_global_layout_callback), _REF(this)); // FIXME: cleanup callback for _UNREF
+ 		_SET_LONG_FIELD(this, "onGlobalLayout_signal_handle", signal_handle);
+ 	} else if (!have_listeners && signal_handle) {
+-		g_signal_handler_disconnect(G_OBJECT(clock), signal_handle);
++		vto_disconnect(window, signal_handle);
+ 		_SET_LONG_FIELD(this, "onGlobalLayout_signal_handle", 0);
+ 	} else {
+ 		fprintf(stderr, "Java_android_view_ViewTreeObserver_native_1set_1have_1global_1layout_1listeners: invalid state: have_listeners: %d, signal_handle: 0x%016w64x\n", have_listeners, signal_handle);
+-		exit(1);
+ 	}
+ }
+ 
+@@ -63,19 +87,22 @@ JNIEXPORT void JNICALL Java_android_view_ViewTreeObserver_native_1set_1have_1pre
+ 	}
+ 
+ 	gulong signal_handle = _GET_LONG_FIELD(this, "onPreDraw_signal_handle");
+-	GdkFrameClock *clock = gtk_widget_get_frame_clock(window);
++	GdkFrameClock *clock = vto_clock(window);
+ 
+ 	if (have_listeners && !signal_handle) {
++		if (!clock) {
++			fprintf(stderr, "ViewTreeObserver: no frame clock yet, predraw listener not hooked\n");
++			return;
++		}
+ 		/* Unlike AOSP, our hook gets invoked after all widgets have been drawn. */
+ 		/* Switching to ::layout would fix the timing, but we would miss frames where no layout was requested. */
+ 		/* TODO: Hook into the DecorView snapshot function to get in before widget drawing. */
+ 		signal_handle = g_signal_connect(G_OBJECT(clock), "paint", G_CALLBACK(on_pre_draw_callback), _REF(this)); // FIXME: cleanup callback for _UNREF
+ 		_SET_LONG_FIELD(this, "onPreDraw_signal_handle", signal_handle);
+ 	} else if (!have_listeners && signal_handle) {
+-		g_signal_handler_disconnect(G_OBJECT(clock), signal_handle);
++		vto_disconnect(window, signal_handle);
+ 		_SET_LONG_FIELD(this, "onPreDraw_signal_handle", 0);
+ 	} else {
+ 		fprintf(stderr, "Java_android_view_ViewTreeObserver_native_1set_1have_1predraw_1listeners: invalid state: have_listeners: %d, signal_handle: 0x%016w64x\n", have_listeners, signal_handle);
+-		exit(1);
+ 	}
+ }
+-- 
+2.43.0
+

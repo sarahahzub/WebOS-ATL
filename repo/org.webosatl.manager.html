@@ -1,0 +1,9 @@
+<p><b>webOS ATL</b> runs Android apps natively on rooted LG webOS TVs, using
+<a href="https://gitlab.com/android_translation_layer">Android Translation Layer</a> (no emulator, no Android VM).</p>
+<p>Requirements: rooted TV with Homebrew Channel, 64-bit CPU (<code>uname -m</code> = aarch64), 600 MB free space,
+1.5 GB RAM recommended. Tested on LG 43UR7500 (webOS 23); other models are untested.</p>
+<p>After installing, open <b>webOS ATL</b> and press <b>Install</b>: it sets up its service and downloads the Android
+runtime (about 200 MB). Then install APKs from a phone or laptop browser at <code>http://&lt;tv-ip&gt;:8790/</code>,
+or from a download link in the app. Each Android app gets its own icon in the TV's app list.</p>
+<p>Many apps work, many do not yet (no Google Play services, limited WebView and media support). See the project
+page for the compatibility list and known issues.</p>

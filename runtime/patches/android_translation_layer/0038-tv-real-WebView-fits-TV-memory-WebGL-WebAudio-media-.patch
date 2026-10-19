@@ -1,0 +1,35 @@
+From cd85e20ad878b09bbc04aebd18b73a6af6913d25 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 14:55:48 +0530
+Subject: [PATCH 38/42] tv: real WebView fits TV memory - WebGL/WebAudio/media
+ off and JSC_useJIT=false (Turnstile page was ~1 GB, memchute closed
+ CloudStream); ATL_WEBVIEW_FULL=1 keeps defaults
+
+---
+ src/api-impl-jni/widgets/android_webkit_WebView.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/api-impl-jni/widgets/android_webkit_WebView.c b/src/api-impl-jni/widgets/android_webkit_WebView.c
+index d3627a5d..6a06c530 100644
+--- a/src/api-impl-jni/widgets/android_webkit_WebView.c
++++ b/src/api-impl-jni/widgets/android_webkit_WebView.c
+@@ -65,8 +65,16 @@ JNIEXPORT jlong JNICALL Java_android_webkit_WebView_native_1constructor(JNIEnv *
+ 	if (!getenv("ATL_UGLY_ENABLE_WEBVIEW"))
+ 		return Java_android_view_View_native_1constructor(env, this, context, attrs);
+ 
++	if (!getenv("ATL_WEBVIEW_FULL"))  // TV memory: JSC JIT off in the WebKit processes (inherited env)
++		setenv("JSC_useJIT", "false", 0);
+ 	GtkWidget *wrapper = g_object_ref(wrapper_widget_new());
+ 	GtkWidget *webview = webkit_web_view_new();
++	if (!getenv("ATL_WEBVIEW_FULL")) {  // WebGL/WebAudio/media fingerprinting made a Turnstile page take ~1 GB
++		WebKitSettings *ws = webkit_web_view_get_settings(WEBKIT_WEB_VIEW(webview));
++		webkit_settings_set_enable_webgl(ws, FALSE);
++		webkit_settings_set_enable_webaudio(ws, FALSE);
++		webkit_settings_set_enable_media(ws, FALSE);
++	}
+ 	wrapper_widget_set_child(WRAPPER_WIDGET(wrapper), webview);
+ 	wrapper_widget_set_jobject(WRAPPER_WIDGET(wrapper), env, this);
+ 	wrapper_widget_register_invalidation_listener(WRAPPER_WIDGET(wrapper));
+-- 
+2.43.0
+

@@ -1,0 +1,103 @@
+From 71629724417de334edca90bdd1f5de49a1f33fc6 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 00:47:39 +0530
+Subject: [PATCH 26/42] tv: MediaCodec.setOutputSurface in the hardware decode
+ path (ATL_HWDEC): hole punch + video area follow the new SurfaceView, returns
+ at once (ExoPlayer Detaching surface timed out)
+
+---
+ .../media/android_media_MediaCodec.c          | 49 ++++++++++++++++++-
+ src/api-impl/android/media/MediaCodec.java    |  3 ++
+ 2 files changed, 50 insertions(+), 2 deletions(-)
+
+diff --git a/src/api-impl-jni/media/android_media_MediaCodec.c b/src/api-impl-jni/media/android_media_MediaCodec.c
+index a6be61b4..50718183 100644
+--- a/src/api-impl-jni/media/android_media_MediaCodec.c
++++ b/src/api-impl-jni/media/android_media_MediaCodec.c
+@@ -159,8 +159,8 @@ static gboolean hw_has_vcl(const uint8_t *b, size_t n, gboolean hevc)
+ static gboolean hwdec_area_idle(gpointer p)
+ {
+ 	struct hwdec *hw = p;
+-	GtkWidget *w = GTK_WIDGET(hw->widget);
+-	if (!hw->closed && !hw->dead) {
++	if (!hw->closed && !hw->dead && hw->widget) {
++		GtkWidget *w = GTK_WIDGET(hw->widget);
+ 		if (!hw->widget->hole_punch) {
+ 			hw->widget->hole_punch = TRUE;
+ 			gtk_widget_queue_draw(w);
+@@ -410,6 +410,51 @@ JNIEXPORT void JNICALL Java_android_media_MediaCodec_native_1set_1video_1size(JN
+ 	ctx->hw_height = height;
+ }
+ 
++struct hw_retarget {
++	struct hwdec *hw;
++	SurfaceViewWidget *widget; /* NULL: no SurfaceView (detached / placeholder Surface) */
++};
++
++/* main thread: setOutputSurface - hole punch and video area move to the new SurfaceView (the decoder keeps going) */
++static gboolean hwdec_retarget_idle(gpointer p)
++{
++	struct hw_retarget *rt = p;
++	struct hwdec *hw = rt->hw;
++	if (hw->widget != rt->widget) {
++		if (hw->widget) {
++			if (hw->widget->hole_punch) {
++				hw->widget->hole_punch = FALSE;
++				gtk_widget_queue_draw(GTK_WIDGET(hw->widget));
++			}
++			g_object_unref(hw->widget);
++		}
++		hw->widget = rt->widget; /* takes the reference */
++		rt->widget = NULL;
++		memset(hw->area, 0, sizeof(hw->area)); /* AREA is sent again for the new rect */
++		fprintf(stderr, "ATL_HWDEC: output surface changed (%s)\n", hw->widget ? "new SurfaceView" : "no SurfaceView");
++	}
++	if (rt->widget)
++		g_object_unref(rt->widget);
++	free(rt);
++	return hwdec_area_idle(hw); /* drops the reference taken in setOutputSurface */
++}
++
++JNIEXPORT void JNICALL Java_android_media_MediaCodec_native_1set_1output_1surface(JNIEnv *env, jobject this, jlong codec, jobject surface_obj)
++{
++	struct ATL_codec_context *ctx = _PTR(codec);
++	if (!ctx->hw)
++		return; /* FFmpeg path: unchanged (no-op) */
++	jlong wp = surface_obj ? _GET_LONG_FIELD(surface_obj, "widget") : 0;
++	GtkWidget *child = wp ? gtk_widget_get_first_child(_PTR(wp)) : NULL;
++	struct hw_retarget *rt = calloc(1, sizeof(*rt));
++	rt->hw = ctx->hw;
++	rt->widget = child && SURFACE_VIEW_IS_WIDGET(child) ? g_object_ref(SURFACE_VIEW_WIDGET(child)) : NULL;
++	g_atomic_int_inc(&ctx->hw->refs);
++	ctx->hw->last_area = g_get_monotonic_time(); /* the retarget does this area update */
++	fprintf(stderr, "ATL_HWDEC: setOutputSurface(%s)\n", rt->widget ? "SurfaceView" : "no SurfaceView");
++	g_idle_add(hwdec_retarget_idle, rt);
++}
++
+ JNIEXPORT jlong JNICALL Java_android_media_MediaCodec_native_1constructor(JNIEnv *env, jobject this, jstring codec_name)
+ {
+ 	const char *name = (*env)->GetStringUTFChars(env, codec_name, NULL);
+diff --git a/src/api-impl/android/media/MediaCodec.java b/src/api-impl/android/media/MediaCodec.java
+index db213b86..8c34b206 100644
+--- a/src/api-impl/android/media/MediaCodec.java
++++ b/src/api-impl/android/media/MediaCodec.java
+@@ -200,6 +200,8 @@ public class MediaCodec {
+ 	}
+ 
+ 	public void setOutputSurface(Surface surface) {
++		if (native_codec != 0)
++			native_set_output_surface(native_codec, surface);
+ 	}
+ 
+ 	public void setParameters(Bundle parameters) {}
+@@ -223,6 +225,7 @@ public class MediaCodec {
+ 	private native void native_configure_audio(long codec, ByteBuffer extradata, int sampleRate, int channelCount);
+ 	private native void native_configure_video(long codec, ByteBuffer csd0, ByteBuffer csd1, Surface surface);
+ 	private native void native_set_video_size(long codec, int width, int height);
++	private native void native_set_output_surface(long codec, Surface surface);
+ 	private native void native_start(long codec);
+ 	private native int native_queueInputBuffer(long codec, ByteBuffer buffer, long presentationTimeUs);
+ 	private native int native_dequeueOutputBuffer(long codec, ByteBuffer buffer, BufferInfo info);
+-- 
+2.43.0
+

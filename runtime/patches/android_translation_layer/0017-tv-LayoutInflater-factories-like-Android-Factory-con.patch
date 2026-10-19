@@ -1,0 +1,105 @@
+From ae56a7b41eec6ae8e53882f06d2d3c8bae6fcd5c Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 22:00:49 +0530
+Subject: [PATCH 17/42] tv: LayoutInflater factories like Android (Factory
+ consulted, Factory2 extends Factory, Activity as private factory,
+ Activity.onCreateView(parent,..) forwards to onCreateView(name,..)) -
+ CloudStream crashed with uninitialized viewModel
+
+---
+ src/api-impl/android/app/Activity.java        |  6 ++++
+ src/api-impl/android/view/LayoutInflater.java | 35 +++++++++++++++++--
+ 2 files changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/src/api-impl/android/app/Activity.java b/src/api-impl/android/app/Activity.java
+index e3072292..1fbe0a23 100644
+--- a/src/api-impl/android/app/Activity.java
++++ b/src/api-impl/android/app/Activity.java
+@@ -612,6 +612,12 @@ public class Activity extends ContextThemeWrapper implements Window.Callback, La
+ 	}
+ 
+ 	public View onCreateView(View parent, String name, Context context, AttributeSet attrs) {
++		if (!"fragment".equals(name))
++			return onCreateView(name, context, attrs);
++		return null;
++	}
++
++	public View onCreateView(String name, Context context, AttributeSet attrs) {
+ 		return null;
+ 	}
+ 
+diff --git a/src/api-impl/android/view/LayoutInflater.java b/src/api-impl/android/view/LayoutInflater.java
+index 2fd55cc2..94e8d89f 100644
+--- a/src/api-impl/android/view/LayoutInflater.java
++++ b/src/api-impl/android/view/LayoutInflater.java
+@@ -39,12 +39,34 @@ public class LayoutInflater {
+ 	}
+ 
+ 	public interface Factory {
++		public View onCreateView(String name, Context context, AttributeSet attrs);
+ 	}
+ 
+-	public interface Factory2 {
++	public interface Factory2 extends Factory {
+ 		public View onCreateView(View parent, String name, Context context, AttributeSet attrs);
+ 	}
+ 
++	private Factory2 mPrivateFactory;
++
++	/* hidden API in Android: the Activity is the private factory of its window's inflater */
++	public void setPrivateFactory(Factory2 factory) {
++		mPrivateFactory = factory;
++	}
++
++	private Factory2 privateFactory() {
++		if (mPrivateFactory != null)
++			return mPrivateFactory;
++		Context c = context;
++		for (int i = 0; c != null && i < 16; i++) {
++			if (c instanceof android.app.Activity)
++				return (Factory2)c;
++			if (!(c instanceof android.content.ContextWrapper))
++				break;
++			c = ((android.content.ContextWrapper)c).getBaseContext();
++		}
++		return context instanceof Factory2 ? (Factory2)context : null;
++	}
++
+ 	private Factory2 mFactory2;
+ 	private Context context;
+ 	private LinkedList<Factory2> factories = new LinkedList<>();
+@@ -58,6 +80,7 @@ public class LayoutInflater {
+ 		this.factories.addAll(original.factories);
+ 		this.mFactory = original.mFactory;
+ 		this.mFactory2 = original.mFactory2;
++		this.mPrivateFactory = original.mPrivateFactory;
+ 	}
+ 
+ 	private Factory mFactory;
+@@ -143,8 +166,13 @@ public class LayoutInflater {
+ 			if (view != null)
+ 				break;
+ 		}
+-		if (view == null && context instanceof Factory2) {
+-			view = ((Factory2)context).onCreateView(parent, name, context, attrs);
++		if (view == null && mFactory != null && !(mFactory instanceof Factory2 && factories.contains(mFactory))) {
++			view = mFactory.onCreateView(name, context, attrs);
++		}
++		if (view == null) {
++			Factory2 pf = privateFactory();
++			if (pf != null)
++				view = pf.onCreateView(parent, name, context, attrs);
+ 		}
+ 		if (view == null && -1 == name.indexOf('.')) {
+ 			view = onCreateView(parent, name, attrs);
+@@ -355,6 +383,7 @@ public class LayoutInflater {
+ 		inflater.factories.addAll(factories);
+ 		inflater.mFactory = mFactory;
+ 		inflater.mFactory2 = mFactory2;
++		inflater.mPrivateFactory = mPrivateFactory;
+ 		return inflater;
+ 	}
+ 
+-- 
+2.43.0
+

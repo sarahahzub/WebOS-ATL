@@ -1,0 +1,411 @@
+From 375309bc485392015cac8d3902e8ebc717645e3f Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 17:21:34 +0530
+Subject: [PATCH 15/42] tv: inline dialogs (ATL_DIALOG_INLINE, default on TV):
+ dialogs as an overlay in the main window, BACK/touch-outside cancel, Dialog
+ cancelable/OnCancelListener, DialogInterface listener methods
+
+---
+ src/api-impl-jni/app/android_app_Activity.c   |  19 ++-
+ src/api-impl-jni/app/android_app_Activity.h   |   3 +
+ src/api-impl-jni/app/android_app_Dialog.c     | 121 +++++++++++++++++-
+ .../views/android_view_WindowManagerImpl.c    |   3 +-
+ src/api-impl/android/app/AlertDialog.java     |   2 +
+ src/api-impl/android/app/Dialog.java          |  41 +++++-
+ .../android/content/DialogInterface.java      |   3 +
+ src/main-executable/main.c                    |   6 +-
+ 8 files changed, 187 insertions(+), 11 deletions(-)
+
+diff --git a/src/api-impl-jni/app/android_app_Activity.c b/src/api-impl-jni/app/android_app_Activity.c
+index 4daf6a31..e059363c 100644
+--- a/src/api-impl-jni/app/android_app_Activity.c
++++ b/src/api-impl-jni/app/android_app_Activity.c
+@@ -12,6 +12,11 @@
+ 
+ extern GtkWindow *window;
+ 
++GtkStack *atl_main_stack(void)
++{
++	return GTK_STACK(g_object_get_data(G_OBJECT(window), "atl-stack"));
++}
++
+ static GList *activity_backlog = NULL;
+ static jobject activity_current = NULL;
+ 
+@@ -32,7 +37,7 @@ static void activity_close(JNIEnv *env, jobject activity)
+ 	}
+ 
+ 	GtkWidget *decor_view = get_decor_view(env, activity);
+-	GtkStack *stack = GTK_STACK(gtk_window_get_child(window));
++	GtkStack *stack = atl_main_stack();
+ 	gtk_stack_remove(stack, decor_view);
+ 
+ 	/* -- run the activity's onDestroy -- */
+@@ -70,7 +75,7 @@ static void activity_focus(JNIEnv *env, jobject activity)
+ 		return;
+ 
+ 	GtkWidget *decor_view = get_decor_view(env, activity);
+-	GtkStack *stack = GTK_STACK(gtk_window_get_child(window));
++	GtkStack *stack = atl_main_stack();
+ 	gtk_stack_set_visible_child(stack, decor_view);
+ 
+ 	(*env)->CallVoidMethod(env, activity, handle_cache.activity.onResume);
+@@ -196,7 +201,7 @@ void activity_start(JNIEnv *env, jobject activity_object)
+ 	activity_backlog = g_list_prepend(activity_backlog, _REF(activity_object));
+ 
+ 	GtkWidget *decor_view = get_decor_view(env, activity_object);
+-	GtkStack *stack = GTK_STACK(gtk_window_get_child(window));
++	GtkStack *stack = atl_main_stack();
+ 	gtk_stack_add_child(stack, decor_view);
+ 
+ 	activity_update_current(env);
+@@ -359,6 +364,7 @@ JNIEXPORT jboolean JNICALL Java_android_app_Activity_isTaskRoot(JNIEnv *env, job
+ 
+ /* ---- keys no widget consumed go to the current Activity (Android: PhoneWindow -> Activity.dispatchKeyEvent) ---- */
+ int atl_map_key_code(guint keyval, guint keycode);
++jobject atl_inline_dialog_top(void);
+ int atl_map_meta_state(GdkModifierType state);
+ 
+ static gboolean activity_key(guint keyval, guint keycode, GdkModifierType state, int action)
+@@ -375,8 +381,11 @@ static gboolean activity_key(guint keyval, guint keycode, GdkModifierType state,
+ 		return FALSE;
+ 	jobject key_event = (*env)->NewObject(env, handle_cache.key_event.class, handle_cache.key_event.constructor, down_time, now, action, code, 0, atl_map_meta_state(state));
+ 	_SET_INT_FIELD(key_event, "unicodeValue", gdk_keyval_to_unicode(keyval));
+-	jmethodID dispatch = _METHOD(_CLASS(activity_current), "dispatchKeyEvent", "(Landroid/view/KeyEvent;)Z");
+-	gboolean ret = (*env)->CallBooleanMethod(env, activity_current, dispatch, key_event);
++	jobject target = atl_inline_dialog_top(); /* a dialog shown inside the window gets keys first (BACK cancels it) */
++	if (!target)
++		target = activity_current;
++	jmethodID dispatch = _METHOD(_CLASS(target), "dispatchKeyEvent", "(Landroid/view/KeyEvent;)Z");
++	gboolean ret = (*env)->CallBooleanMethod(env, target, dispatch, key_event);
+ 	if ((*env)->ExceptionCheck(env))
+ 		(*env)->ExceptionDescribe(env);
+ 	(*env)->DeleteLocalRef(env, key_event);
+diff --git a/src/api-impl-jni/app/android_app_Activity.h b/src/api-impl-jni/app/android_app_Activity.h
+index 1b6536ae..5667840d 100644
+--- a/src/api-impl-jni/app/android_app_Activity.h
++++ b/src/api-impl-jni/app/android_app_Activity.h
+@@ -6,3 +6,6 @@ void activity_close_all(void);
+ void current_activity_back_pressed(void);
+ #include <gtk/gtk.h>
+ void activity_install_key_controller(GtkWindow *w);
++
++/* the activity GtkStack (the main window's child is a GtkOverlay holding it) */
++GtkStack *atl_main_stack(void);
+diff --git a/src/api-impl-jni/app/android_app_Dialog.c b/src/api-impl-jni/app/android_app_Dialog.c
+index d2992ae8..6512d328 100644
+--- a/src/api-impl-jni/app/android_app_Dialog.c
++++ b/src/api-impl-jni/app/android_app_Dialog.c
+@@ -7,6 +7,104 @@
+ 
+ /* main app window */
+ extern GtkWindow *window;
++#include <string.h>
++
++/* ---- inline dialogs ---- */
++#include "../app/android_app_Activity.h"
++static GList *inline_dialogs; /* GtkWindow* (data holder), topmost first */
++
++static gboolean inline_enabled(void)
++{
++	static int on = -1;
++	if (on < 0) {
++		const char *e = getenv("ATL_DIALOG_INLINE");
++		on = e ? strcmp(e, "0") != 0 : getenv("ATL_IS_TELEVISION") != NULL;
++		if (on) {
++			GtkCssProvider *css = gtk_css_provider_new();
++			gtk_css_provider_load_from_string(css, ".atl-dialog-scrim { background-color: rgba(0,0,0,0.5); }");
++			gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
++		}
++	}
++	return on;
++}
++
++jobject atl_inline_dialog_top(void)
++{
++	return inline_dialogs ? g_object_get_data(G_OBJECT(inline_dialogs->data), "atl-jobj") : NULL;
++}
++
++static void on_scrim_pressed(GtkGestureClick *g, int n, double x, double y, GtkWindow *dialog)
++{
++	GtkWidget *scrim = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
++	GtkWidget *card = g_object_get_data(G_OBJECT(dialog), "atl-inline-card");
++	GtkWidget *hit = gtk_widget_pick(scrim, x, y, GTK_PICK_DEFAULT);
++	if (hit && card && (hit == card || gtk_widget_is_ancestor(hit, card)))
++		return;
++	if (!GPOINTER_TO_INT(g_object_get_data(G_OBJECT(dialog), "atl-cancel-outside")))
++		return;
++	jobject jobj = g_object_get_data(G_OBJECT(dialog), "atl-jobj");
++	JNIEnv *env = get_jni_env();
++	(*env)->CallVoidMethod(env, jobj, _METHOD(_CLASS(jobj), "cancel", "()V"));
++	if ((*env)->ExceptionCheck(env))
++		(*env)->ExceptionDescribe(env);
++}
++
++static void inline_show(GtkWindow *dialog)
++{
++	if (g_object_get_data(G_OBJECT(dialog), "atl-inline-scrim"))
++		return;
++	GtkWidget *overlay = g_object_get_data(G_OBJECT(window), "atl-overlay");
++	GtkWidget *child = gtk_window_get_child(dialog);
++	GtkWidget *scrim = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
++	gtk_widget_add_css_class(scrim, "atl-dialog-scrim");
++	gtk_widget_set_halign(scrim, GTK_ALIGN_FILL);
++	gtk_widget_set_valign(scrim, GTK_ALIGN_FILL);
++	GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
++	gtk_widget_set_hexpand(card, TRUE);
++	gtk_widget_set_vexpand(card, TRUE);
++	gtk_widget_set_halign(card, GTK_ALIGN_CENTER);
++	gtk_widget_set_valign(card, GTK_ALIGN_CENTER);
++	int w = -1, h = -1;
++	gtk_window_get_default_size(dialog, &w, &h);
++	gtk_widget_set_size_request(card, w > 0 ? w : -1, h > 0 ? h : -1);
++	if (child) {
++		g_object_ref(child);
++		gtk_window_set_child(dialog, NULL);
++		gtk_box_append(GTK_BOX(card), child);
++		g_object_unref(child);
++	}
++	gtk_box_append(GTK_BOX(scrim), card);
++	GtkGesture *click = gtk_gesture_click_new();
++	g_signal_connect(click, "pressed", G_CALLBACK(on_scrim_pressed), dialog);
++	gtk_widget_add_controller(scrim, GTK_EVENT_CONTROLLER(click));
++	gtk_overlay_add_overlay(GTK_OVERLAY(overlay), scrim);
++	g_object_set_data(G_OBJECT(dialog), "atl-inline-scrim", scrim);
++	g_object_set_data(G_OBJECT(dialog), "atl-inline-card", card);
++	inline_dialogs = g_list_prepend(inline_dialogs, dialog);
++	if (child)
++		gtk_widget_child_focus(child, GTK_DIR_TAB_FORWARD);
++}
++
++static gboolean inline_close(GtkWindow *dialog)
++{
++	GtkWidget *scrim = g_object_get_data(G_OBJECT(dialog), "atl-inline-scrim");
++	if (!scrim)
++		return FALSE;
++	GtkWidget *card = g_object_get_data(G_OBJECT(dialog), "atl-inline-card");
++	GtkWidget *child = gtk_widget_get_first_child(card);
++	if (child) {
++		g_object_ref(child);
++		gtk_box_remove(GTK_BOX(card), child);
++		gtk_window_set_child(dialog, child);
++		g_object_unref(child);
++	}
++	gtk_overlay_remove_overlay(GTK_OVERLAY(g_object_get_data(G_OBJECT(window), "atl-overlay")), scrim);
++	g_object_set_data(G_OBJECT(dialog), "atl-inline-scrim", NULL);
++	g_object_set_data(G_OBJECT(dialog), "atl-inline-card", NULL);
++	inline_dialogs = g_list_remove(inline_dialogs, dialog);
++	return TRUE;
++}
++
+ 
+ static gboolean on_close_request(GtkWidget *dialog, jobject jobj)
+ {
+@@ -59,7 +157,9 @@ JNIEXPORT jlong JNICALL Java_android_app_Dialog_nativeInit(JNIEnv *env, jobject
+ 	GtkWidget *dialog = gtk_window_new();
+ 	gtk_window_set_transient_for(GTK_WINDOW(dialog), window);
+ 	gtk_window_set_child(GTK_WINDOW(dialog), gtk_widget_get_parent(decor_view));
+-	g_signal_connect(GTK_WINDOW(dialog), "close-request", G_CALLBACK(on_close_request), _REF(this));
++	jobject ref = _REF(this);
++	g_object_set_data(G_OBJECT(dialog), "atl-jobj", ref);
++	g_signal_connect(GTK_WINDOW(dialog), "close-request", G_CALLBACK(on_close_request), ref);
+ 	return _INTPTR(g_object_ref(dialog));
+ }
+ 
+@@ -75,6 +175,14 @@ JNIEXPORT void JNICALL Java_android_app_Dialog_nativeSetContentView(JNIEnv *env,
+ {
+ 	GtkWindow *dialog = GTK_WINDOW(_PTR(ptr));
+ 	GtkWidget *widget = GTK_WIDGET(_PTR(widget_ptr));
++	GtkWidget *card = g_object_get_data(G_OBJECT(dialog), "atl-inline-card");
++	if (card) {
++		GtkWidget *old = gtk_widget_get_first_child(card);
++		if (old)
++			gtk_box_remove(GTK_BOX(card), old);
++		gtk_box_append(GTK_BOX(card), gtk_widget_get_parent(widget));
++		return;
++	}
+ 
+ 	gtk_window_set_child(dialog, gtk_widget_get_parent(widget));
+ }
+@@ -82,6 +190,10 @@ JNIEXPORT void JNICALL Java_android_app_Dialog_nativeSetContentView(JNIEnv *env,
+ JNIEXPORT void JNICALL Java_android_app_Dialog_nativeShow(JNIEnv *env, jobject this, jlong ptr)
+ {
+ 	GtkWindow *dialog = GTK_WINDOW(_PTR(ptr));
++	if (inline_enabled()) {
++		inline_show(dialog);
++		return;
++	}
+ 	gtk_window_present(dialog);
+ }
+ 
+@@ -89,20 +201,25 @@ JNIEXPORT void JNICALL Java_android_app_Dialog_nativeClose(JNIEnv *env, jobject
+ {
+ 	GtkWindow *dialog = GTK_WINDOW(_PTR(ptr));
+ 	remove_touch_outside(dialog);
++	if (inline_close(dialog))
++		return;
+ 	gtk_window_close(dialog);
+ }
+ 
+ JNIEXPORT jboolean JNICALL Java_android_app_Dialog_nativeIsShowing(JNIEnv *env, jobject this, jlong ptr)
+ {
+ 	GtkWindow *dialog = GTK_WINDOW(_PTR(ptr));
++	if (g_object_get_data(G_OBJECT(dialog), "atl-inline-scrim"))
++		return TRUE;
+ 	return gtk_widget_is_visible(GTK_WIDGET(dialog));
+ }
+ 
+ JNIEXPORT void JNICALL Java_android_app_Dialog_nativeSetCanceledOnTouchOutside(JNIEnv *env, jobject this, jlong ptr, jboolean cancel)
+ {
+ 	GtkWindow *dialog = GTK_WINDOW(_PTR(ptr));
++	g_object_set_data(G_OBJECT(dialog), "atl-cancel-outside", GINT_TO_POINTER(cancel ? 1 : 0));
+ 	remove_touch_outside(dialog);
+-	if (!cancel)
++	if (!cancel || inline_enabled())
+ 		return;
+ 
+ 	struct touch_outside *outside = g_new0(struct touch_outside, 1);
+diff --git a/src/api-impl-jni/views/android_view_WindowManagerImpl.c b/src/api-impl-jni/views/android_view_WindowManagerImpl.c
+index 560084b0..6d202df2 100644
+--- a/src/api-impl-jni/views/android_view_WindowManagerImpl.c
++++ b/src/api-impl-jni/views/android_view_WindowManagerImpl.c
+@@ -1,6 +1,7 @@
+ #include <gtk/gtk.h>
+ 
+ #include "../defines.h"
++#include "../app/android_app_Activity.h"
+ #include "../generated_headers/android_view_WindowManagerImpl.h"
+ #include "gdk/gdk.h"
+ #include "glib-object.h"
+@@ -22,7 +23,7 @@ JNIEXPORT void JNICALL Java_android_view_WindowManagerImpl_native_1addView(JNIEn
+ 	printf("::: x=%d, y=%d, width=%d, height=%d\n", x, y, width, height);
+ 	gtk_popover_set_autohide(popover, FALSE);
+ 	gtk_popover_set_pointing_to(popover, &(GdkRectangle){.x = x, .y = y});
+-	GtkStack *stack = GTK_STACK(gtk_window_get_child(window));
++	GtkStack *stack = atl_main_stack();
+ 	GtkWidget *decor_view = gtk_stack_get_visible_child(stack);
+ 	gtk_widget_insert_before(GTK_WIDGET(popover), decor_view, NULL);
+ 	gtk_popover_present(popover);
+diff --git a/src/api-impl/android/app/AlertDialog.java b/src/api-impl/android/app/AlertDialog.java
+index 016ead05..bdb29ae3 100644
+--- a/src/api-impl/android/app/AlertDialog.java
++++ b/src/api-impl/android/app/AlertDialog.java
+@@ -99,6 +99,7 @@ public class AlertDialog extends Dialog implements DialogInterface {
+ 		}
+ 
+ 		public AlertDialog.Builder setCancelable(boolean cancelable) {
++			dialog.setCancelable(cancelable);
+ 			return this;
+ 		}
+ 
+@@ -144,6 +145,7 @@ public class AlertDialog extends Dialog implements DialogInterface {
+ 		}
+ 
+ 		public Builder setOnCancelListener(OnCancelListener onCancelListener) {
++			dialog.setOnCancelListener(onCancelListener);
+ 			return this;
+ 		}
+ 
+diff --git a/src/api-impl/android/app/Dialog.java b/src/api-impl/android/app/Dialog.java
+index 1f4c3c65..278cd410 100644
+--- a/src/api-impl/android/app/Dialog.java
++++ b/src/api-impl/android/app/Dialog.java
+@@ -1,5 +1,7 @@
+ package android.app;
+ 
++import android.view.KeyEvent;
++
+ import android.R;
+ import android.content.Context;
+ import android.content.DialogInterface;
+@@ -77,9 +79,42 @@ public class Dialog implements Window.Callback, DialogInterface {
+ 
+ 	public void setOwnerActivity(Activity activity) {}
+ 
+-	public void setCancelable(boolean cancelable) {}
++	private boolean cancelable = true;
++	private OnCancelListener onCancelListener;
++
++	public void setCancelable(boolean cancelable) {
++		this.cancelable = cancelable;
++	}
++
++	public void setOnCancelListener(OnCancelListener onCancelListener) {
++		this.onCancelListener = onCancelListener;
++	}
++
++	public void onBackPressed() {
++		if (cancelable)
++			cancel();
++	}
++
++	public boolean dispatchKeyEvent(KeyEvent event) {
++		if (event.getKeyCode() == KeyEvent.KEYCODE_BACK || event.getKeyCode() == KeyEvent.KEYCODE_ESCAPE) {
++			if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled())
++				onBackPressed();
++			return true;
++		}
++		if (event.getAction() == KeyEvent.ACTION_DOWN)
++			return onKeyDown(event.getKeyCode(), event);
++		if (event.getAction() == KeyEvent.ACTION_UP)
++			return onKeyUp(event.getKeyCode(), event);
++		return false;
++	}
++
++	public boolean onKeyDown(int keyCode, KeyEvent event) {
++		return false;
++	}
+ 
+-	public void setOnCancelListener(OnCancelListener onCancelListener) {}
++	public boolean onKeyUp(int keyCode, KeyEvent event) {
++		return false;
++	}
+ 
+ 	public void setOnDismissListener(OnDismissListener onDismissListener) {
+ 		this.onDismissListener = onDismissListener;
+@@ -214,6 +249,8 @@ public class Dialog implements Window.Callback, DialogInterface {
+ 
+ 	@Override
+ 	public void cancel() {
++		if (onCancelListener != null)
++			onCancelListener.onCancel(this);
+ 		dismiss();
+ 	}
+ 
+diff --git a/src/api-impl/android/content/DialogInterface.java b/src/api-impl/android/content/DialogInterface.java
+index 67b41c08..bfee2cd3 100644
+--- a/src/api-impl/android/content/DialogInterface.java
++++ b/src/api-impl/android/content/DialogInterface.java
+@@ -22,9 +22,12 @@ public interface DialogInterface {
+ 		void onShow(DialogInterface dialog);
+ 	}
+ 	public interface OnCancelListener {
++		void onCancel(DialogInterface dialog);
+ 	}
+ 	public interface OnMultiChoiceClickListener {
++		void onClick(DialogInterface dialog, int which, boolean isChecked);
+ 	}
+ 	public interface OnKeyListener {
++		boolean onKey(DialogInterface dialog, int keyCode, android.view.KeyEvent event);
+ 	}
+ }
+diff --git a/src/main-executable/main.c b/src/main-executable/main.c
+index 9c8f415c..4e1e47f9 100644
+--- a/src/main-executable/main.c
++++ b/src/main-executable/main.c
+@@ -480,7 +480,11 @@ static void open(GtkApplication *app, GFile **files, gint nfiles, const gchar *h
+ 	GtkWidget *stack = gtk_stack_new();
+ 	gtk_stack_set_transition_type(GTK_STACK(stack), (getenv("ATL_NO_ANIMATIONS") || getenv("ATL_IS_TELEVISION")) ? GTK_STACK_TRANSITION_TYPE_NONE
+ 	                                                                                                             : GTK_STACK_TRANSITION_TYPE_SLIDE_LEFT_RIGHT);
+-	gtk_window_set_child(GTK_WINDOW(window), stack);
++	GtkWidget *atl_overlay = gtk_overlay_new(); /* inline dialogs (ATL_DIALOG_INLINE) are overlays above the activity stack */
++	gtk_overlay_set_child(GTK_OVERLAY(atl_overlay), stack);
++	gtk_window_set_child(GTK_WINDOW(window), atl_overlay);
++	g_object_set_data(G_OBJECT(window), "atl-stack", stack);
++	g_object_set_data(G_OBJECT(window), "atl-overlay", atl_overlay);
+ 	activity_install_key_controller(GTK_WINDOW(window));
+ 
+ 	const char *disable_decoration_env = getenv("ATL_DISABLE_WINDOW_DECORATIONS");
+-- 
+2.43.0
+

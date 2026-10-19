@@ -1,0 +1,81 @@
+From d7acb4caed871a88d46c6977f0c851d1a39b913d Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 19:08:50 +0530
+Subject: [PATCH 16/42] tv: network reported as connected+VALIDATED
+ (NetworkCapabilities), NetworkInfo.isAvailable/getTypeName/DetailedState
+ (apps showed network not available)
+
+---
+ .../android/net/ConnectivityManager.java      |  5 +++++
+ src/api-impl/android/net/NetworkInfo.java     | 22 +++++++++++++++----
+ 2 files changed, 23 insertions(+), 4 deletions(-)
+
+diff --git a/src/api-impl/android/net/ConnectivityManager.java b/src/api-impl/android/net/ConnectivityManager.java
+index 1d0df693..3d15e7ee 100644
+--- a/src/api-impl/android/net/ConnectivityManager.java
++++ b/src/api-impl/android/net/ConnectivityManager.java
+@@ -84,6 +84,11 @@ public class ConnectivityManager {
+ 
+ 		NetworkCapabilities capabilities = new NetworkCapabilities();
+ 		capabilities.addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
++		// a default route = working connectivity: what Android calls VALIDATED (apps check it before every request)
++		for (int c : new int[] {NetworkCapabilities.NET_CAPABILITY_VALIDATED, NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED,
++		                        NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING, NetworkCapabilities.NET_CAPABILITY_NOT_CONGESTED,
++		                        NetworkCapabilities.NET_CAPABILITY_FOREGROUND})
++			capabilities.addCapability(c);
+ 
+ 		if (!isActiveNetworkMetered())
+ 			capabilities.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+diff --git a/src/api-impl/android/net/NetworkInfo.java b/src/api-impl/android/net/NetworkInfo.java
+index 75fba76d..cfb4cb9b 100644
+--- a/src/api-impl/android/net/NetworkInfo.java
++++ b/src/api-impl/android/net/NetworkInfo.java
+@@ -10,7 +10,21 @@ public class NetworkInfo {
+ 		UNKNOWN
+ 	}
+ 
+-	public enum DetailedState {}
++	public enum DetailedState {
++		IDLE,
++		SCANNING,
++		CONNECTING,
++		AUTHENTICATING,
++		OBTAINING_IPADDR,
++		CONNECTED,
++		SUSPENDED,
++		DISCONNECTING,
++		DISCONNECTED,
++		FAILED,
++		BLOCKED,
++		VERIFYING_POOR_LINK,
++		CAPTIVE_PORTAL_CHECK
++	}
+ 
+ 	private State state = State.DISCONNECTED;
+ 
+@@ -47,7 +61,7 @@ public class NetworkInfo {
+ 	}
+ 
+ 	public String getTypeName() {
+-		return "UNKNOWN";
++		return state == State.CONNECTED ? "WIFI" : "UNKNOWN";
+ 	}
+ 
+ 	public String getSubtypeName() {
+@@ -55,11 +69,11 @@ public class NetworkInfo {
+ 	}
+ 
+ 	public boolean isAvailable() {
+-		return false;
++		return state == State.CONNECTED;
+ 	}
+ 
+ 	public DetailedState getDetailedState() {
+-		return null;
++		return state == State.CONNECTED ? DetailedState.CONNECTED : DetailedState.DISCONNECTED;
+ 	}
+ 
+ 	public String getExtraInfo() {
+-- 
+2.43.0
+

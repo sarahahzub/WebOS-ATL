@@ -1,0 +1,78 @@
+From ffbc7d987670b80564d6665373ff253f72217d45 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 17:52:18 +0530
+Subject: [PATCH 40/42] tv: diagnostics - touch /tmp/atltree dumps the mapped
+ widget tree (type, Java class, rect, opacity, backgrounds) to stderr
+
+---
+ src/api-impl-jni/views/android_view_View.c | 50 ++++++++++++++++++++++
+ 1 file changed, 50 insertions(+)
+
+diff --git a/src/api-impl-jni/views/android_view_View.c b/src/api-impl-jni/views/android_view_View.c
+index 9acf2d77..72c9867e 100644
+--- a/src/api-impl-jni/views/android_view_View.c
++++ b/src/api-impl-jni/views/android_view_View.c
+@@ -2,6 +2,7 @@
+ #include <stdio.h>
+ 
+ #include <gtk/gtk.h>
++#include <unistd.h>
+ 
+ #include "../defines.h"
+ #include "../util.h"
+@@ -1303,3 +1304,52 @@ JNIEXPORT void JNICALL Java_android_view_View_getWindowVisibleDisplayFrame(JNIEn
+ 	_SET_INT_FIELD(rect, "right", width);
+ 	_SET_INT_FIELD(rect, "bottom", height);
+ }
++
++
++/* ---- tv: widget tree dump on `touch /tmp/atltree` (ATLTREE) ---- */
++static void atltree_walk(GtkWidget *w, GtkWidget *root, int depth)
++{
++	int ww = gtk_widget_get_width(w), hh = gtk_widget_get_height(w);
++	if (gtk_widget_get_mapped(w) && ww >= 200 && hh >= 100) {
++		graphene_point_t pt = GRAPHENE_POINT_INIT(0, 0);
++		gtk_widget_compute_point(w, root, &GRAPHENE_POINT_INIT(0, 0), &pt);
++		const char *jc = "";
++		const char *bg = "";
++		if (WRAPPER_IS_WIDGET(w)) {
++			WrapperWidget *wr = WRAPPER_WIDGET(w);
++			if (wr->jobj)
++				jc = jcls(wr->jobj);
++			if (wr->background) {
++				GdkPaintable *pa = GTK_IS_PICTURE(wr->background) ? gtk_picture_get_paintable(GTK_PICTURE(wr->background)) : NULL;
++				bg = pa ? G_OBJECT_TYPE_NAME(pa) : "bg-widget";
++			}
++		}
++		const char *paint = "";
++		if (GTK_IS_PICTURE(w)) {
++			GdkPaintable *pa = gtk_picture_get_paintable(GTK_PICTURE(w));
++			paint = pa ? G_OBJECT_TYPE_NAME(pa) : "none";
++		}
++		fprintf(stderr, "ATLTREE %*s%s %s @%.0f,%.0f %dx%d op=%.2f%s%s%s%s\n", depth, "", G_OBJECT_TYPE_NAME(w), jc, pt.x, pt.y, ww, hh,
++		        gtk_widget_get_opacity(w), *bg ? " bg=" : "", bg, *paint ? " paint=" : "", paint);
++	}
++	for (GtkWidget *c = gtk_widget_get_first_child(w); c; c = gtk_widget_get_next_sibling(c))
++		if (gtk_widget_get_mapped(c))
++			atltree_walk(c, root, depth + 1);
++}
++
++static gboolean atltree_dump(gpointer data)
++{
++	if (access("/tmp/atltree", F_OK))
++		return G_SOURCE_CONTINUE;
++	unlink("/tmp/atltree");
++	fprintf(stderr, "ATLTREE ---- dump ----\n");
++	if (window)
++		atltree_walk(GTK_WIDGET(window), GTK_WIDGET(window), 0);
++	fprintf(stderr, "ATLTREE ---- end ----\n");
++	return G_SOURCE_CONTINUE;
++}
++
++__attribute__((constructor)) static void atltree_init(void)
++{
++	g_timeout_add_seconds(1, atltree_dump, NULL);
++}
+-- 
+2.43.0
+

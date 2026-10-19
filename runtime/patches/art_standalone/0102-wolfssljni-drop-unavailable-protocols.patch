@@ -1,0 +1,31 @@
+--- a/external/wolfssljni/src/java/com/wolfssl/provider/jsse/WolfSSLEngineHelper.java	2026-10-16 15:33:30.666294878 +0530
++++ b/external/wolfssljni/src/java/com/wolfssl/provider/jsse/WolfSSLEngineHelper.java	2026-10-16 15:33:30.685099138 +0530
+@@ -218,14 +218,26 @@
+             throw new IllegalArgumentException("input array has length zero");
+         }
+ 
+-        /* sanitize protocol array for unsupported strings */
++        /* sanitize protocol array: like Conscrypt, silently drop known
++         * protocols this wolfSSL build lacks (apps still ask for TLSv1) */
+         List<String> supported = Arrays.asList(getAllProtocols());
++        List<String> known = Arrays.asList("SSLv2Hello", "SSLv3", "TLSv1",
++            "TLSv1.1", "TLSv1.2", "TLSv1.3");
++        java.util.ArrayList<String> usable = new java.util.ArrayList<String>();
+         for (int i = 0; i < p.length; i++) {
+-            if (!supported.contains(p[i])) {
++            if (supported.contains(p[i])) {
++                if (!usable.contains(p[i]))
++                    usable.add(p[i]);
++            } else if (!known.contains(p[i])) {
+                 throw new IllegalArgumentException("Unsupported protocol: " +
+                     p[i]);
+             }
+         }
++        if (usable.isEmpty()) {
++            throw new IllegalArgumentException("Unsupported protocol: " +
++                p[0]);
++        }
++        p = usable.toArray(new String[0]);
+ 
+         this.params.setProtocols(p);
+     }

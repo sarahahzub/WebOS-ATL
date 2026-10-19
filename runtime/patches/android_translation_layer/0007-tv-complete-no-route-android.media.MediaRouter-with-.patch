@@ -1,0 +1,168 @@
+From a8506677fc7cafa3cc61e911f446a23cc1d61b78 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 16:04:37 +0530
+Subject: [PATCH 07/42] tv: complete no-route android.media.MediaRouter with a
+ default route (Cast buttons)
+
+---
+ src/api-impl/android/media/MediaRouter.java | 137 +++++++++++++++++++-
+ 1 file changed, 133 insertions(+), 4 deletions(-)
+
+diff --git a/src/api-impl/android/media/MediaRouter.java b/src/api-impl/android/media/MediaRouter.java
+index 2a7fb4f1..0907243a 100644
+--- a/src/api-impl/android/media/MediaRouter.java
++++ b/src/api-impl/android/media/MediaRouter.java
+@@ -1,17 +1,146 @@
+ package android.media;
+ 
++import android.content.Context;
++import android.graphics.drawable.Drawable;
+ import android.view.Display;
++import java.util.List;
+ 
++/**
++ * ATL has no cast/remote-display routes. This is a complete-enough no-route MediaRouter so that apps embedding
++ * androidx.mediarouter (Chromecast button) inflate and run: there is just one default route and nothing to select.
++ */
+ public class MediaRouter {
++	public static final int ROUTE_TYPE_LIVE_AUDIO = 0x1;
+ 	public static final int ROUTE_TYPE_LIVE_VIDEO = 0x2;
++	public static final int ROUTE_TYPE_USER = 0x00800000;
++	public static final int CALLBACK_FLAG_PERFORM_ACTIVE_SCAN = 1 << 0;
++	public static final int CALLBACK_FLAG_REQUEST_DISCOVERY = 1 << 2;
++	public static final int CALLBACK_FLAG_UNFILTERED_EVENTS = 1 << 3;
++
++	private final RouteCategory defaultCategory = new RouteCategory("Default", ROUTE_TYPE_LIVE_AUDIO | ROUTE_TYPE_LIVE_VIDEO, false);
++	private final RouteInfo defaultRoute = new RouteInfo(defaultCategory);
+ 
+ 	public static class RouteInfo {
+-		public Display getPresentationDisplay() {
+-			return new Display();
++		private final RouteCategory category;
++		private CharSequence name = "ATL";
++		private CharSequence description;
++		private CharSequence status;
++		private Object tag;
++		private Drawable icon;
++
++		RouteInfo(RouteCategory category) {
++			this.category = category;
++		}
++
++		public CharSequence getName(Context context) { return name; }
++		public CharSequence getName() { return name; }
++		public CharSequence getDescription() { return description; }
++		public CharSequence getStatus() { return status; }
++		public int getSupportedTypes() { return category.getSupportedTypes(); }
++		public int getDeviceType() { return 0; }
++		public RouteGroup getGroup() { return null; }
++		public RouteCategory getCategory() { return category; }
++		public Drawable getIconDrawable() { return icon; }
++		public void setTag(Object tag) { this.tag = tag; }
++		public Object getTag() { return tag; }
++		public int getPlaybackType() { return 1; }
++		public int getPlaybackStream() { return 3; }
++		public int getVolume() { return 0; }
++		public void requestSetVolume(int volume) {}
++		public void requestUpdateVolume(int direction) {}
++		public int getVolumeMax() { return 0; }
++		public int getVolumeHandling() { return 1; }
++		public boolean isEnabled() { return true; }
++		public boolean isConnecting() { return false; }
++		public boolean isDefault() { return true; }
++		public boolean isSelected() { return true; }
++		public Display getPresentationDisplay() { return new Display(); }
++		public String toString() { return "RouteInfo{" + name + "}"; }
++	}
++
++	public static class UserRouteInfo extends RouteInfo {
++		UserRouteInfo(RouteCategory category) { super(category); }
++		public void setName(CharSequence name) {}
++		public void setName(int resId) {}
++		public void setDescription(CharSequence description) {}
++		public void setStatus(CharSequence status) {}
++		public void setIconDrawable(Drawable icon) {}
++		public void setIconResource(int resId) {}
++		public void setVolume(int volume) {}
++		public void setVolumeMax(int volumeMax) {}
++		public void setVolumeHandling(int volumeHandling) {}
++		public void setPlaybackType(int type) {}
++		public void setPlaybackStream(int stream) {}
++		public void setVolumeCallback(VolumeCallback vcb) {}
++	}
++
++	public static class RouteGroup extends RouteInfo {
++		RouteGroup(RouteCategory category) { super(category); }
++		public void addRoute(RouteInfo route) {}
++		public void addRoute(RouteInfo route, int insertAt) {}
++		public void removeRoute(RouteInfo route) {}
++		public void removeRoute(int index) {}
++		public int getRouteCount() { return 0; }
++		public RouteInfo getRouteAt(int index) { return null; }
++		public void setIconDrawable(Drawable icon) {}
++		public void setIconResource(int resId) {}
++	}
++
++	public static class RouteCategory {
++		private final CharSequence name;
++		private final int types;
++		private final boolean groupable;
++
++		RouteCategory(CharSequence name, int types, boolean groupable) {
++			this.name = name;
++			this.types = types;
++			this.groupable = groupable;
+ 		}
++
++		public CharSequence getName(Context context) { return name; }
++		public CharSequence getName() { return name; }
++		public List<RouteInfo> getRoutes(List<RouteInfo> out) { return out; }
++		public int getSupportedTypes() { return types; }
++		public boolean isGroupable() { return groupable; }
++		public boolean isSystem() { return false; }
++		public String toString() { return "RouteCategory{" + name + "}"; }
+ 	}
+ 
+-	public RouteInfo getSelectedRoute(int type) {
+-		return new RouteInfo();
++	public static class Callback {
++		public void onRouteSelected(MediaRouter router, int type, RouteInfo info) {}
++		public void onRouteUnselected(MediaRouter router, int type, RouteInfo info) {}
++		public void onRouteAdded(MediaRouter router, RouteInfo info) {}
++		public void onRouteRemoved(MediaRouter router, RouteInfo info) {}
++		public void onRouteChanged(MediaRouter router, RouteInfo info) {}
++		public void onRouteGrouped(MediaRouter router, RouteInfo info, RouteGroup group, int index) {}
++		public void onRouteUngrouped(MediaRouter router, RouteInfo info, RouteGroup group) {}
++		public void onRouteVolumeChanged(MediaRouter router, RouteInfo info) {}
++		public void onRoutePresentationDisplayChanged(MediaRouter router, RouteInfo info) {}
+ 	}
++
++	public static class SimpleCallback extends Callback {}
++
++	public abstract static class VolumeCallback {
++		public abstract void onVolumeUpdateRequest(RouteInfo info, int direction);
++		public abstract void onVolumeSetRequest(RouteInfo info, int volume);
++	}
++
++	public RouteInfo getSelectedRoute(int type) { return defaultRoute; }
++	public RouteInfo getSelectedRoute() { return defaultRoute; }
++	public RouteInfo getDefaultRoute() { return defaultRoute; }
++	public void addCallback(int types, Callback cb) {}
++	public void addCallback(int types, Callback cb, int flags) {}
++	public void removeCallback(Callback cb) {}
++	public void selectRoute(int types, RouteInfo route) {}
++	public int getRouteCount() { return 1; }
++	public RouteInfo getRouteAt(int index) { return index == 0 ? defaultRoute : null; }
++	public int getCategoryCount() { return 1; }
++	public RouteCategory getCategoryAt(int index) { return index == 0 ? defaultCategory : null; }
++	public RouteCategory createRouteCategory(CharSequence name, boolean isGroupable) { return new RouteCategory(name, ROUTE_TYPE_USER, isGroupable); }
++	public RouteCategory createRouteCategory(int nameResId, boolean isGroupable) { return new RouteCategory("User", ROUTE_TYPE_USER, isGroupable); }
++	public UserRouteInfo createUserRoute(RouteCategory category) { return new UserRouteInfo(category); }
++	public void addUserRoute(UserRouteInfo info) {}
++	public void addUserRoute(RouteInfo info) {}
++	public void removeUserRoute(UserRouteInfo info) {}
++	public void clearUserRoutes() {}
+ }
+-- 
+2.43.0
+

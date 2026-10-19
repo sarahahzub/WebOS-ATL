@@ -1,0 +1,272 @@
+From 751dd1d09889a4b00cb61c967e30bf2de2bf61d7 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 16:15:54 +0530
+Subject: [PATCH 12/42] tv: remote keys (evdev BACK/OK/MENU/media/colour/CH ->
+ Android keycodes), unconsumed keys go to Activity.dispatchKeyEvent, BACK ->
+ onBackPressed
+
+---
+ src/api-impl-jni/app/android_app_Activity.c | 46 +++++++++++
+ src/api-impl-jni/app/android_app_Activity.h |  2 +
+ src/api-impl-jni/widgets/WrapperWidget.c    | 89 ++++++++++++++++++++-
+ src/api-impl/android/app/Activity.java      | 35 +++++++-
+ src/main-executable/main.c                  |  1 +
+ 5 files changed, 170 insertions(+), 3 deletions(-)
+
+diff --git a/src/api-impl-jni/app/android_app_Activity.c b/src/api-impl-jni/app/android_app_Activity.c
+index a48c50a9..4daf6a31 100644
+--- a/src/api-impl-jni/app/android_app_Activity.c
++++ b/src/api-impl-jni/app/android_app_Activity.c
+@@ -355,3 +355,49 @@ JNIEXPORT jboolean JNICALL Java_android_app_Activity_isTaskRoot(JNIEnv *env, job
+ 	// NULL means that we are currently creating the root activity, so no other activity can exist yet
+ 	return root_activity == NULL || (*env)->IsSameObject(env, this, root_activity);
+ }
++
++
++/* ---- keys no widget consumed go to the current Activity (Android: PhoneWindow -> Activity.dispatchKeyEvent) ---- */
++int atl_map_key_code(guint keyval, guint keycode);
++int atl_map_meta_state(GdkModifierType state);
++
++static gboolean activity_key(guint keyval, guint keycode, GdkModifierType state, int action)
++{
++	if (!activity_current)
++		return FALSE;
++	JNIEnv *env = get_jni_env();
++	static jlong down_time;
++	jlong now = g_get_monotonic_time() / 1000;
++	if (action == 0)
++		down_time = now;
++	int code = atl_map_key_code(keyval, keycode);
++	if (!code)
++		return FALSE;
++	jobject key_event = (*env)->NewObject(env, handle_cache.key_event.class, handle_cache.key_event.constructor, down_time, now, action, code, 0, atl_map_meta_state(state));
++	_SET_INT_FIELD(key_event, "unicodeValue", gdk_keyval_to_unicode(keyval));
++	jmethodID dispatch = _METHOD(_CLASS(activity_current), "dispatchKeyEvent", "(Landroid/view/KeyEvent;)Z");
++	gboolean ret = (*env)->CallBooleanMethod(env, activity_current, dispatch, key_event);
++	if ((*env)->ExceptionCheck(env))
++		(*env)->ExceptionDescribe(env);
++	(*env)->DeleteLocalRef(env, key_event);
++	return ret;
++}
++
++static gboolean on_window_key_pressed(GtkEventControllerKey *c, guint keyval, guint keycode, GdkModifierType state, gpointer d)
++{
++	return activity_key(keyval, keycode, state, 0 /* ACTION_DOWN */);
++}
++
++static gboolean on_window_key_released(GtkEventControllerKey *c, guint keyval, guint keycode, GdkModifierType state, gpointer d)
++{
++	return activity_key(keyval, keycode, state, 1 /* ACTION_UP */);
++}
++
++void activity_install_key_controller(GtkWindow *w)
++{
++	GtkEventController *controller = gtk_event_controller_key_new();
++	gtk_event_controller_set_propagation_phase(controller, GTK_PHASE_BUBBLE);
++	g_signal_connect(controller, "key-pressed", G_CALLBACK(on_window_key_pressed), NULL);
++	g_signal_connect(controller, "key-released", G_CALLBACK(on_window_key_released), NULL);
++	gtk_widget_add_controller(GTK_WIDGET(w), controller);
++}
+diff --git a/src/api-impl-jni/app/android_app_Activity.h b/src/api-impl-jni/app/android_app_Activity.h
+index fc12333f..1b6536ae 100644
+--- a/src/api-impl-jni/app/android_app_Activity.h
++++ b/src/api-impl-jni/app/android_app_Activity.h
+@@ -4,3 +4,5 @@ void activity_start(JNIEnv *env, jobject activity_object);
+ void activity_window_ready(void);
+ void activity_close_all(void);
+ void current_activity_back_pressed(void);
++#include <gtk/gtk.h>
++void activity_install_key_controller(GtkWindow *w);
+diff --git a/src/api-impl-jni/widgets/WrapperWidget.c b/src/api-impl-jni/widgets/WrapperWidget.c
+index 89a991ad..7e6c5428 100644
+--- a/src/api-impl-jni/widgets/WrapperWidget.c
++++ b/src/api-impl-jni/widgets/WrapperWidget.c
+@@ -385,12 +385,92 @@ static int map_key_code(int key_code)
+ 	}
+ }
+ 
++
++/* ---- TV remote: Linux evdev codes (Wayland keycode = evdev + 8) -> Android KeyEvent codes ---- */
++static int map_tv_evdev(guint evdev)
++{
++	switch (evdev) {
++		case 158: /* KEY_BACK */
++		case 412: /* KEY_PREVIOUS: webOS remote Back */
++			return 4;   /* KEYCODE_BACK */
++		case 352: /* KEY_OK */
++		case 353: /* KEY_SELECT */
++			return 23;  /* KEYCODE_DPAD_CENTER */
++		case 139: /* KEY_MENU */
++		case 127: /* KEY_COMPOSE */
++			return 82;  /* KEYCODE_MENU */
++		case 358: /* KEY_INFO */
++			return 165; /* KEYCODE_INFO */
++		case 398: return 183; /* KEY_RED -> PROG_RED */
++		case 399: return 184; /* GREEN */
++		case 400: return 185; /* YELLOW */
++		case 401: return 186; /* BLUE */
++		case 402: return 166; /* KEY_CHANNELUP -> CHANNEL_UP */
++		case 403: return 167; /* KEY_CHANNELDOWN */
++		case 164: return 85;  /* KEY_PLAYPAUSE -> MEDIA_PLAY_PAUSE */
++		case 207: return 126; /* KEY_PLAY -> MEDIA_PLAY */
++		case 200: return 126; /* KEY_PLAYCD */
++		case 119: return 127; /* KEY_PAUSE -> MEDIA_PAUSE */
++		case 201: return 127; /* KEY_PAUSECD */
++		case 128: /* KEY_STOP */
++		case 166: return 86;  /* KEY_STOPCD -> MEDIA_STOP */
++		case 163: return 87;  /* KEY_NEXTSONG -> MEDIA_NEXT */
++		case 165: return 88;  /* KEY_PREVIOUSSONG -> MEDIA_PREVIOUS */
++		case 168: return 89;  /* KEY_REWIND -> MEDIA_REWIND */
++		case 208: return 90;  /* KEY_FASTFORWARD -> MEDIA_FAST_FORWARD */
++		case 167: return 130; /* KEY_RECORD -> MEDIA_RECORD */
++		case 370: return 175; /* KEY_SUBTITLE -> CAPTIONS */
++		case 392: return 222; /* KEY_AUDIO -> MEDIA_AUDIO_TRACK */
++		case 365: return 172; /* KEY_EPG -> GUIDE */
++		case 377: return 170; /* KEY_TV -> TV */
++		case 388: return 233; /* KEY_TEXT -> TV_TELETEXT */
++		case 113: return 164; /* KEY_MUTE -> VOLUME_MUTE */
++		case 115: return 24;  /* KEY_VOLUMEUP */
++		case 114: return 25;  /* KEY_VOLUMEDOWN */
++		case 28:  /* KEY_ENTER: LG remote OK arrives as ENTER on some models; leave ENTER */
++		default:
++			return 0;
++	}
++}
++
++int atl_map_key_code(guint keyval, guint keycode)
++{
++	static int tv = -1;
++	if (tv < 0)
++		tv = getenv("ATL_IS_TELEVISION") != NULL;
++	if (keycode >= 8) {
++		int k = map_tv_evdev(keycode - 8);
++		if (k)
++			return k;
++	}
++	if (keyval == GDK_KEY_Back || (tv && keyval == GDK_KEY_Escape))
++		return 4; /* KEYCODE_BACK */
++	if (keyval == GDK_KEY_Menu)
++		return 82;
++	if (keyval == GDK_KEY_AudioPlay)
++		return 126;
++	if (keyval == GDK_KEY_AudioPause)
++		return 127;
++	if (keyval == GDK_KEY_AudioStop)
++		return 86;
++	if (keyval == GDK_KEY_AudioNext)
++		return 87;
++	if (keyval == GDK_KEY_AudioPrev)
++		return 88;
++	if (keyval == GDK_KEY_AudioRewind)
++		return 89;
++	if (keyval == GDK_KEY_AudioForward)
++		return 90;
++	return map_key_code(keyval);
++}
++
+ #define META_SHIFT_ON     (1 << 0)
+ #define META_ALT_ON       (1 << 1)
+ #define META_CTRL_ON      (1 << 12)
+ #define META_META_ON      (1 << 16)
+ #define META_CAPS_LOCK_ON (1 << 20)
+ 
++int atl_map_meta_state(GdkModifierType state);
+ static int map_meta_state(GdkModifierType state)
+ {
+ 	int meta_state = 0;
+@@ -414,7 +494,7 @@ static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval,
+ {
+ 	JNIEnv *env = get_jni_env();
+ 
+-	jobject key_event = (*env)->NewObject(env, handle_cache.key_event.class, handle_cache.key_event.constructor, (jlong)0, (jlong)0, ACTION_DOWN, map_key_code(keyval), 0, map_meta_state(state));
++	jobject key_event = (*env)->NewObject(env, handle_cache.key_event.class, handle_cache.key_event.constructor, (jlong)0, (jlong)0, ACTION_DOWN, atl_map_key_code(keyval, keycode), 0, map_meta_state(state));
+ 	_SET_INT_FIELD(key_event, "unicodeValue", gdk_keyval_to_unicode(keyval));
+ 	gboolean ret = (*env)->CallBooleanMethod(env, wrapper->jobj, handle_cache.view.dispatchKeyEvent, key_event);
+ 	if ((*env)->ExceptionCheck(env))
+@@ -426,7 +506,7 @@ static gboolean on_key_released(GtkEventControllerKey *controller, guint keyval,
+ {
+ 	JNIEnv *env = get_jni_env();
+ 
+-	jobject key_event = (*env)->NewObject(env, handle_cache.key_event.class, handle_cache.key_event.constructor, (jlong)0, (jlong)0, ACTION_UP, map_key_code(keyval), 0, map_meta_state(state));
++	jobject key_event = (*env)->NewObject(env, handle_cache.key_event.class, handle_cache.key_event.constructor, (jlong)0, (jlong)0, ACTION_UP, atl_map_key_code(keyval, keycode), 0, map_meta_state(state));
+ 	_SET_INT_FIELD(key_event, "unicodeValue", gdk_keyval_to_unicode(keyval));
+ 	gboolean ret = (*env)->CallBooleanMethod(env, wrapper->jobj, handle_cache.view.dispatchKeyEvent, key_event);
+ 	if ((*env)->ExceptionCheck(env))
+@@ -575,3 +655,8 @@ void wrapper_widget_register_invalidation_listener(WrapperWidget *wrapper)
+ 	g_signal_connect(wrapper, "realize", G_CALLBACK(on_realize), NULL);
+ 	g_signal_connect(wrapper, "unrealize", G_CALLBACK(on_unrealize), NULL);
+ }
++
++int atl_map_meta_state(GdkModifierType state)
++{
++	return map_meta_state(state);
++}
+diff --git a/src/api-impl/android/app/Activity.java b/src/api-impl/android/app/Activity.java
+index 42e3fa8f..e3072292 100644
+--- a/src/api-impl/android/app/Activity.java
++++ b/src/api-impl/android/app/Activity.java
+@@ -38,7 +38,7 @@ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+ 
+-public class Activity extends ContextThemeWrapper implements Window.Callback, LayoutInflater.Factory2 {
++public class Activity extends ContextThemeWrapper implements Window.Callback, LayoutInflater.Factory2, KeyEvent.Callback {
+ 	private final static String TAG = "Activity";
+ 
+ 	public static final int RESULT_CANCELED = 0;
+@@ -653,7 +653,40 @@ public class Activity extends ContextThemeWrapper implements Window.Callback, La
+ 		finish();
+ 	}
+ 
++	/* Android: Window -> view hierarchy -> KeyEvent.dispatch(this). In ATL the view hierarchy already had the key
++	 * through GTK (WrapperWidget controllers), so this only sees keys no view consumed. */
+ 	public boolean dispatchKeyEvent(KeyEvent event) {
++		onUserInteraction();
++		return event.dispatch(this, null, this);
++	}
++
++	public void onUserInteraction() {}
++
++	public boolean onKeyDown(int keyCode, KeyEvent event) {
++		if (keyCode == KeyEvent.KEYCODE_BACK) {
++			event.startTracking();
++			return true;
++		}
++		return false;
++	}
++
++	public boolean onKeyUp(int keyCode, KeyEvent event) {
++		if (keyCode == KeyEvent.KEYCODE_BACK && !event.isCanceled()) {
++			onBackPressed();
++			return true;
++		}
++		return false;
++	}
++
++	public boolean onKeyLongPress(int keyCode, KeyEvent event) {
++		return false;
++	}
++
++	public boolean onKeyMultiple(int keyCode, int repeatCount, KeyEvent event) {
++		return false;
++	}
++
++	public boolean onKeyShortcut(int keyCode, KeyEvent event) {
+ 		return false;
+ 	}
+ 
+diff --git a/src/main-executable/main.c b/src/main-executable/main.c
+index f47421a0..9c8f415c 100644
+--- a/src/main-executable/main.c
++++ b/src/main-executable/main.c
+@@ -481,6 +481,7 @@ static void open(GtkApplication *app, GFile **files, gint nfiles, const gchar *h
+ 	gtk_stack_set_transition_type(GTK_STACK(stack), (getenv("ATL_NO_ANIMATIONS") || getenv("ATL_IS_TELEVISION")) ? GTK_STACK_TRANSITION_TYPE_NONE
+ 	                                                                                                             : GTK_STACK_TRANSITION_TYPE_SLIDE_LEFT_RIGHT);
+ 	gtk_window_set_child(GTK_WINDOW(window), stack);
++	activity_install_key_controller(GTK_WINDOW(window));
+ 
+ 	const char *disable_decoration_env = getenv("ATL_DISABLE_WINDOW_DECORATIONS");
+ 	gboolean decorated;
+-- 
+2.43.0
+

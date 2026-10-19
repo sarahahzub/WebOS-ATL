@@ -1,0 +1,48 @@
+From 8ce862c93986396237120def8221da443506738c Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 16:04:50 +0530
+Subject: [PATCH 08/42] tv: KeyEvent.getUnicodeChar returns 0 for
+ non-characters; MotionEvent.getClassification (Compose)
+
+---
+ src/api-impl/android/view/KeyEvent.java    | 3 ++-
+ src/api-impl/android/view/MotionEvent.java | 2 ++
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/api-impl/android/view/KeyEvent.java b/src/api-impl/android/view/KeyEvent.java
+index d90a74a1..d273b845 100644
+--- a/src/api-impl/android/view/KeyEvent.java
++++ b/src/api-impl/android/view/KeyEvent.java
+@@ -2988,7 +2988,8 @@ public class KeyEvent extends InputEvent implements Parcelable {
+ 	 */
+ 	public int getUnicodeChar(int metaState) {
+ 		// return getKeyCharacterMap().get(mKeyCode, metaState);
+-		return unicodeValue;
++		int c = unicodeValue; /* ATL: native code may pass keysym garbage; Compose appends this as a code point */
++		return (c < 0 || c > 0x10FFFF || (c >= 0xD800 && c < 0xE000)) ? 0 : c;
+ 	}
+ 
+ 	/**
+diff --git a/src/api-impl/android/view/MotionEvent.java b/src/api-impl/android/view/MotionEvent.java
+index 815b165d..572e3143 100644
+--- a/src/api-impl/android/view/MotionEvent.java
++++ b/src/api-impl/android/view/MotionEvent.java
+@@ -1373,6 +1373,7 @@ public final class MotionEvent extends InputEvent {
+ 	int source;
+ 	int action;
+ 	long eventTime;
++	private static final boolean TOUCH_DEBUG = System.getenv("ATL_TOUCH_DEBUG") != null;
+ 	int[] ids;
+ 	float[] coords;
+ 
+@@ -1394,6 +1395,7 @@ public final class MotionEvent extends InputEvent {
+ 	}
+ 
+ 	public MotionEvent(int source, int action, long eventTime, int[] ids, float[] coords) {
++		if (TOUCH_DEBUG) System.out.println("ATLTOUCH action=" + action + " t=" + eventTime + " n=" + ids.length + " xy=" + (coords.length >= 2 ? coords[0] + "," + coords[1] : "-") + " raw=" + (coords.length >= 4 ? coords[2] + "," + coords[3] : "-") + " len=" + coords.length);
+ 		this.source = source;
+ 		this.action = action;
+ 		this.eventTime = eventTime;
+-- 
+2.43.0
+

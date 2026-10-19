@@ -1,0 +1,81 @@
+From 06aa8a4a95013032b879f9ca95bc05ddbfa47efa Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 17:56:38 +0530
+Subject: [PATCH 29/42] tv: hardware decode frame pacing (ATL_HWDEC):
+ releaseOutputBuffer(index, releaseTimeNs) sends AVD_DUE so atlvdec feeds NDL
+ (low-delay mode: shown when decoded) at the display time instead of 0-50 ms
+ early; render/drop/timed counters
+
+---
+ .../media/android_media_MediaCodec.c          | 27 ++++++++++++++++---
+ 1 file changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/src/api-impl-jni/media/android_media_MediaCodec.c b/src/api-impl-jni/media/android_media_MediaCodec.c
+index 50718183..b5a3f12f 100644
+--- a/src/api-impl-jni/media/android_media_MediaCodec.c
++++ b/src/api-impl-jni/media/android_media_MediaCodec.c
+@@ -60,7 +60,7 @@ struct avd_hdr {
+ 	uint32_t len;
+ 	int64_t pts_us;
+ };
+-enum { AVD_OPEN = 1, AVD_FEED = 2, AVD_AREA = 3, AVD_FLUSH = 4, AVD_CLOSE = 5, AVD_RESULT = 16 };
++enum { AVD_OPEN = 1, AVD_FEED = 2, AVD_AREA = 3, AVD_FLUSH = 4, AVD_CLOSE = 5, AVD_DUE = 6, AVD_RESULT = 16 };
+ 
+ #define HW_WINDOW 4
+ #define HW_MAX_AUS 24
+@@ -97,6 +97,8 @@ struct hwdec {
+ 	int area[4];
+ 	gint64 last_area;
+ 	unsigned long fed;
++	unsigned long n_rel, n_drop, n_timed; /* releaseOutputBuffer calls: all, render=false, with a release time */
++	int64_t early_sum, early_max;         /* how far ahead of now the release times were (ns) */
+ };
+ 
+ static void hwdec_unref(struct hwdec *hw)
+@@ -379,7 +381,7 @@ static jint hwdec_dequeue(JNIEnv *env, struct hwdec *hw, jobject buffer, jobject
+ }
+ 
+ /* feed every pending AU up to the token's decode index, at least one */
+-static void hwdec_release(JNIEnv *env, struct hwdec *hw, jobject buffer)
++static void hwdec_release(JNIEnv *env, struct hwdec *hw, jobject buffer, jboolean render, jlong release_ns)
+ {
+ 	jarray array_ref;
+ 	jbyte *array;
+@@ -387,6 +389,25 @@ static void hwdec_release(JNIEnv *env, struct hwdec *hw, jobject buffer)
+ 	uint8_t *raw = get_nio_buffer(env, buffer, &array_ref, &array);
+ 	memcpy(&token, raw, sizeof(token));
+ 	release_nio_buffer(env, array_ref, array);
++	int64_t due = render && release_ns > 0 ? release_ns : 0;
++	hw->n_rel++;
++	if (!render)
++		hw->n_drop++;
++	if (due) {
++		int64_t e = due - g_get_monotonic_time() * 1000;
++		hw->n_timed++;
++		hw->early_sum += e;
++		if (e > hw->early_max)
++			hw->early_max = e;
++	}
++	if (hw->n_rel % 600 == 0) {
++		fprintf(stderr, "ATL_HWDEC: releases %lu: %lu dropped (render=false), %lu timed, release time ahead avg %.1f max %.1f ms\n",
++		        hw->n_rel, hw->n_drop, hw->n_timed, hw->n_timed ? hw->early_sum / 1e6 / hw->n_timed : 0.0, hw->early_max / 1e6);
++		hw->n_drop = hw->n_timed = 0;
++		hw->early_sum = hw->early_max = 0;
++	}
++	if (hw->n_aus)
++		hw_send(hw, AVD_DUE, &due, sizeof(due), NULL, 0, 0);
+ 	int n = 0;
+ 	while (n < hw->n_aus && (n == 0 || hw->aus[n].idx <= token)) {
+ 		struct hw_au *au = &hw->aus[n];
+@@ -868,7 +889,7 @@ JNIEXPORT void JNICALL Java_android_media_MediaCodec_native_1releaseOutputBuffer
+ 	AVFrame *frame;
+ 
+ 	if (ctx->hw) {
+-		hwdec_release(env, ctx->hw, buffer);
++		hwdec_release(env, ctx->hw, buffer, render, presentationTimeNs);
+ 		return;
+ 	}
+ 	if (ctx->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
+-- 
+2.43.0
+

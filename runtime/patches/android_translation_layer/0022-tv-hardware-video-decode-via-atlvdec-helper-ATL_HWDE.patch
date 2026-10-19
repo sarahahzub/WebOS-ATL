@@ -1,0 +1,588 @@
+From 02d2b403a2ab3ed1877ca8d845051b360ca72c75 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 14:55:30 +0530
+Subject: [PATCH 22/42] tv: hardware video decode via atlvdec helper
+ (ATL_HWDEC=1): MediaCodec h264/hevc -> libNDL_directmedia on the TV video
+ plane, SurfaceView hole punch, FFmpeg fallback
+
+---
+ .../media/android_media_MediaCodec.c          | 404 ++++++++++++++++++
+ .../widgets/android_view_SurfaceView.c        |   2 +-
+ .../widgets/android_view_SurfaceView.h        |   1 +
+ src/api-impl/android/media/MediaCodec.java    |   5 +-
+ .../android/media/MediaCodecInfo.java         |  11 +
+ .../android/media/MediaCodecList.java         |   8 +-
+ 6 files changed, 428 insertions(+), 3 deletions(-)
+
+diff --git a/src/api-impl-jni/media/android_media_MediaCodec.c b/src/api-impl-jni/media/android_media_MediaCodec.c
+index 5cca29df..a6be61b4 100644
+--- a/src/api-impl-jni/media/android_media_MediaCodec.c
++++ b/src/api-impl-jni/media/android_media_MediaCodec.c
+@@ -20,6 +20,13 @@
+ #include <libswscale/swscale.h>
+ 
+ #include <stdlib.h>
++#include <errno.h>
++#include <inttypes.h>
++#include <poll.h>
++#include <pthread.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
+ 
+ #include "../defines.h"
+ #include "../util.h"
+@@ -42,8 +49,367 @@ struct ATL_codec_context {
+ 			uint8_t *extradata;
+ 		} video;
+ 	};
++	struct hwdec *hw; /* ATL_HWDEC: video goes to the atlvdec helper */
++	int hw_width, hw_height;
+ };
+ 
++/* ---------------- ATL_HWDEC: hardware decode through the 32-bit atlvdec helper (gpu/atlvdec/proto.h) ---------------- */
++
++struct avd_hdr {
++	uint32_t type;
++	uint32_t len;
++	int64_t pts_us;
++};
++enum { AVD_OPEN = 1, AVD_FEED = 2, AVD_AREA = 3, AVD_FLUSH = 4, AVD_CLOSE = 5, AVD_RESULT = 16 };
++
++#define HW_WINDOW 4
++#define HW_MAX_AUS 24
++#define HW_MAX_BYTES (8 << 20)
++
++struct hw_au {
++	uint8_t *data;
++	size_t len;
++	int64_t pts;
++	int64_t idx;
++};
++
++struct hwdec {
++	gint refs;
++	pthread_mutex_t lock; /* fd writes: codec thread + main thread (AREA) */
++	int fd;
++	gboolean dead, closed, debug;
++	struct hw_au *aus; /* unsent, decode order */
++	int n_aus, cap_aus;
++	size_t bytes;
++	int64_t next_idx;
++	struct {
++		int64_t pts, idx;
++	} win[HW_MAX_AUS + HW_WINDOW + 8]; /* not yet handed out as tokens */
++	int n_win;
++	gboolean eos, eos_sent;
++	uint8_t *csd;
++	size_t csd_len;
++	gboolean need_csd;
++	uint8_t *prefix; /* non-VCL input (config) waiting for the next picture */
++	size_t prefix_len;
++	gboolean hevc;
++	SurfaceViewWidget *widget;
++	int area[4];
++	gint64 last_area;
++	unsigned long fed;
++};
++
++static void hwdec_unref(struct hwdec *hw)
++{
++	if (!g_atomic_int_dec_and_test(&hw->refs))
++		return;
++	if (hw->widget)
++		g_object_unref(hw->widget);
++	pthread_mutex_destroy(&hw->lock);
++	free(hw);
++}
++
++static int hw_write_all(int fd, const void *p, size_t n)
++{
++	const char *c = p;
++	while (n) {
++		ssize_t r = send(fd, c, n, MSG_NOSIGNAL);
++		if (r < 0 && errno == EINTR)
++			continue;
++		if (r <= 0)
++			return -1;
++		c += r;
++		n -= r;
++	}
++	return 0;
++}
++
++static void hw_send(struct hwdec *hw, uint32_t type, const void *a, size_t alen, const void *b, size_t blen, int64_t pts)
++{
++	pthread_mutex_lock(&hw->lock);
++	if (!hw->dead && hw->fd >= 0) {
++		struct avd_hdr h = {type, alen + blen, pts};
++		if (hw_write_all(hw->fd, &h, sizeof(h)) || (alen && hw_write_all(hw->fd, a, alen)) || (blen && hw_write_all(hw->fd, b, blen))) {
++			fprintf(stderr, "ATL_HWDEC: helper connection lost (%s); video stops\n", strerror(errno));
++			hw->dead = TRUE;
++		} else if (hw->debug) {
++			fprintf(stderr, "ATL_HWDEC: -> type %u len %zu pts %" PRId64 "\n", type, alen + blen, pts);
++		}
++	}
++	pthread_mutex_unlock(&hw->lock);
++}
++
++/* does this Annex-B buffer contain a picture (VCL NAL)? (no start code at all: assume yes) */
++static gboolean hw_has_vcl(const uint8_t *b, size_t n, gboolean hevc)
++{
++	gboolean sc = FALSE;
++	for (size_t i = 0; i + 3 < n; i++) {
++		if (b[i] || b[i + 1] || b[i + 2] != 1)
++			continue;
++		sc = TRUE;
++		int t = hevc ? (b[i + 3] >> 1) & 0x3f : b[i + 3] & 0x1f;
++		if (hevc ? t < 32 : (t >= 1 && t <= 5))
++			return TRUE;
++		i += 2;
++	}
++	return !sc;
++}
++
++/* main thread: hole punch on, and the video plane follows the SurfaceView rect */
++static gboolean hwdec_area_idle(gpointer p)
++{
++	struct hwdec *hw = p;
++	GtkWidget *w = GTK_WIDGET(hw->widget);
++	if (!hw->closed && !hw->dead) {
++		if (!hw->widget->hole_punch) {
++			hw->widget->hole_punch = TRUE;
++			gtk_widget_queue_draw(w);
++		}
++		GtkNative *native = gtk_widget_get_native(w);
++		graphene_point_t pos;
++		if (native && gtk_widget_get_mapped(w) && gtk_widget_compute_point(w, GTK_WIDGET(native), &GRAPHENE_POINT_INIT(0, 0), &pos)) {
++			int ww = gtk_widget_get_width(GTK_WIDGET(native)), wh = gtk_widget_get_height(GTK_WIDGET(native));
++			if (ww > 0 && wh > 0) {
++				int r[4] = {
++				    (int)(pos.x * 1920 / ww), (int)(pos.y * 1080 / wh),
++				    (int)(gtk_widget_get_width(w) * 1920.0 / ww), (int)(gtk_widget_get_height(w) * 1080.0 / wh)};
++				if (r[2] > 0 && r[3] > 0 && memcmp(r, hw->area, sizeof(r))) {
++					memcpy(hw->area, r, sizeof(r));
++					int32_t a[4] = {r[0], r[1], r[2], r[3]};
++					fprintf(stderr, "ATL_HWDEC: video area %d,%d %dx%d (window %dx%d)\n", r[0], r[1], r[2], r[3], ww, wh);
++					hw_send(hw, AVD_AREA, a, sizeof(a), NULL, 0, 0);
++				}
++			}
++		}
++	}
++	hwdec_unref(hw);
++	return G_SOURCE_REMOVE;
++}
++
++/* main thread, after release: hole off; drops the codec's reference */
++static gboolean hwdec_close_idle(gpointer p)
++{
++	struct hwdec *hw = p;
++	if (hw->widget && hw->widget->hole_punch) {
++		hw->widget->hole_punch = FALSE;
++		gtk_widget_queue_draw(GTK_WIDGET(hw->widget));
++	}
++	hwdec_unref(hw);
++	return G_SOURCE_REMOVE;
++}
++
++static void hwdec_check_area(struct hwdec *hw)
++{
++	gint64 now = g_get_monotonic_time();
++	if (now - hw->last_area < 500000)
++		return;
++	hw->last_area = now;
++	g_atomic_int_inc(&hw->refs);
++	g_idle_add(hwdec_area_idle, hw);
++}
++
++static void hwdec_clear(struct hwdec *hw)
++{
++	for (int i = 0; i < hw->n_aus; i++)
++		free(hw->aus[i].data);
++	hw->n_aus = 0;
++	hw->bytes = 0;
++	hw->n_win = 0;
++	free(hw->prefix);
++	hw->prefix = NULL;
++	hw->prefix_len = 0;
++	hw->eos = hw->eos_sent = FALSE;
++	hw->need_csd = hw->csd_len > 0;
++}
++
++/* configure: returns TRUE if the hardware path is used */
++static gboolean hwdec_open(struct ATL_codec_context *ctx, const uint8_t *csd, size_t csd_len, SurfaceViewWidget *widget)
++{
++	const char *gate = getenv("ATL_HWDEC");
++	if (!gate || strcmp(gate, "1"))
++		return FALSE;
++	const char *name = ctx->codec->codec->name;
++	gboolean hevc = !strcmp(name, "hevc");
++	if (!hevc && strcmp(name, "h264"))
++		return FALSE;
++	const char *path = getenv("ATL_HWDEC_SOCK");
++	if (!widget || !path || !*path) {
++		fprintf(stderr, "ATL_HWDEC: %s, using FFmpeg\n", !widget ? "no Surface" : "ATL_HWDEC_SOCK not set");
++		return FALSE;
++	}
++	struct sockaddr_un a = {.sun_family = AF_UNIX};
++	snprintf(a.sun_path, sizeof(a.sun_path), "%s", path);
++	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++	if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof(a))) {
++		fprintf(stderr, "ATL_HWDEC: helper %s not reachable (%s), using FFmpeg\n", path, strerror(errno));
++		if (fd >= 0)
++			close(fd);
++		return FALSE;
++	}
++	struct {
++		struct avd_hdr h;
++		uint32_t codec, width, height;
++	} o = {{AVD_OPEN, 12, 0}, hevc ? 2 : 1, ctx->hw_width, ctx->hw_height};
++	struct {
++		struct avd_hdr h;
++		int32_t status;
++		char msg[60];
++	} r = {0};
++	size_t got = 0;
++	if (hw_write_all(fd, &o, sizeof(o.h) + 12) == 0) { /* not sizeof(o): padded to 32 */
++		gint64 end = g_get_monotonic_time() + 10000000; /* NDL load takes ~2 s on the TV */
++		while (got < sizeof(r)) {
++			int left = (int)((end - g_get_monotonic_time()) / 1000);
++			struct pollfd p = {fd, POLLIN, 0};
++			if (left <= 0 || poll(&p, 1, left) <= 0)
++				break;
++			ssize_t n = read(fd, (char *)&r + got, sizeof(r) - got);
++			if (n <= 0)
++				break;
++			got += n;
++		}
++	}
++	if (got < sizeof(r) || r.h.type != AVD_RESULT || r.status != 0) {
++		r.msg[sizeof(r.msg) - 1] = 0;
++		fprintf(stderr, "ATL_HWDEC: helper OPEN failed (%s), using FFmpeg\n", got < sizeof(r) ? "no reply" : r.msg);
++		close(fd);
++		return FALSE;
++	}
++	struct hwdec *hw = calloc(1, sizeof(struct hwdec));
++	hw->refs = 1;
++	pthread_mutex_init(&hw->lock, NULL);
++	hw->fd = fd;
++	hw->hevc = hevc;
++	hw->debug = getenv("ATL_HWDEC_DEBUG") && !strcmp(getenv("ATL_HWDEC_DEBUG"), "1");
++	if (csd_len) {
++		hw->csd = malloc(csd_len);
++		memcpy(hw->csd, csd, csd_len);
++		hw->csd_len = csd_len;
++		hw->need_csd = TRUE;
++	}
++	hw->widget = g_object_ref(widget);
++	hw->last_area = -1000000000;
++	ctx->hw = hw;
++	fprintf(stderr, "ATL_HWDEC: hardware decode active: %s %dx%d via %s\n", name, ctx->hw_width, ctx->hw_height, path);
++	hwdec_check_area(hw);
++	return TRUE;
++}
++
++static int hwdec_queue(JNIEnv *env, struct hwdec *hw, jobject buffer, jlong pts)
++{
++	if (!buffer) {
++		hw->eos = TRUE;
++		return 0;
++	}
++	if (hw->n_aus >= HW_MAX_AUS || hw->bytes > HW_MAX_BYTES)
++		return 1; /* full: Java retries on the next dequeueInputBuffer */
++	jarray array_ref = NULL;
++	jbyte *array = NULL;
++	size_t len = get_nio_buffer_size(env, buffer);
++	uint8_t *data = get_nio_buffer(env, buffer, &array_ref, &array);
++	size_t pre = (hw->need_csd ? hw->csd_len : 0) + hw->prefix_len;
++	uint8_t *au = malloc(pre + len + 1);
++	size_t off = 0;
++	if (hw->need_csd) {
++		memcpy(au, hw->csd, hw->csd_len);
++		off = hw->csd_len;
++	}
++	if (hw->prefix_len) {
++		memcpy(au + off, hw->prefix, hw->prefix_len);
++		off += hw->prefix_len;
++	}
++	if (len)
++		memcpy(au + off, data, len);
++	release_nio_buffer(env, array_ref, array);
++	if (!hw_has_vcl(au + pre, len, hw->hevc)) { /* config only: goes in front of the next picture */
++		free(hw->prefix);
++		hw->prefix = au;
++		hw->prefix_len = pre + len;
++		hw->need_csd = FALSE;
++		return 0;
++	}
++	free(hw->prefix);
++	hw->prefix = NULL;
++	hw->prefix_len = 0;
++	hw->need_csd = FALSE;
++	if (hw->n_aus == hw->cap_aus) {
++		hw->cap_aus = hw->cap_aus ? hw->cap_aus * 2 : 32;
++		hw->aus = realloc(hw->aus, hw->cap_aus * sizeof(*hw->aus));
++	}
++	hw->aus[hw->n_aus++] = (struct hw_au){au, pre + len, pts, hw->next_idx};
++	hw->bytes += pre + len;
++	if (hw->n_win < (int)G_N_ELEMENTS(hw->win)) {
++		hw->win[hw->n_win].pts = pts;
++		hw->win[hw->n_win].idx = hw->next_idx;
++		hw->n_win++;
++	}
++	hw->next_idx++;
++	return 0;
++}
++
++static jint hwdec_dequeue(JNIEnv *env, struct hwdec *hw, jobject buffer, jobject buffer_info)
++{
++	jarray array_ref;
++	jbyte *array;
++	int64_t token;
++	hwdec_check_area(hw);
++	if (hw->n_win > HW_WINDOW || (hw->eos && hw->n_win > 0)) {
++		int m = 0;
++		for (int i = 1; i < hw->n_win; i++)
++			if (hw->win[i].pts < hw->win[m].pts)
++				m = i;
++		token = hw->win[m].idx;
++		_SET_INT_FIELD(buffer_info, "flags", 0);
++		_SET_LONG_FIELD(buffer_info, "presentationTimeUs", hw->win[m].pts);
++		hw->win[m] = hw->win[--hw->n_win];
++	} else if (hw->eos && !hw->eos_sent) {
++		hw->eos_sent = TRUE;
++		token = INT64_MAX;
++		_SET_INT_FIELD(buffer_info, "flags", android_media_MediaCodec_BUFFER_FLAG_END_OF_STREAM);
++		_SET_LONG_FIELD(buffer_info, "presentationTimeUs", 0);
++	} else {
++		return -1; /* INFO_TRY_AGAIN_LATER */
++	}
++	uint8_t *raw = get_nio_buffer(env, buffer, &array_ref, &array);
++	memcpy(raw, &token, sizeof(token));
++	release_nio_buffer(env, array_ref, array);
++	_SET_INT_FIELD(buffer_info, "offset", 0);
++	_SET_INT_FIELD(buffer_info, "size", sizeof(token));
++	return 0;
++}
++
++/* feed every pending AU up to the token's decode index, at least one */
++static void hwdec_release(JNIEnv *env, struct hwdec *hw, jobject buffer)
++{
++	jarray array_ref;
++	jbyte *array;
++	int64_t token;
++	uint8_t *raw = get_nio_buffer(env, buffer, &array_ref, &array);
++	memcpy(&token, raw, sizeof(token));
++	release_nio_buffer(env, array_ref, array);
++	int n = 0;
++	while (n < hw->n_aus && (n == 0 || hw->aus[n].idx <= token)) {
++		struct hw_au *au = &hw->aus[n];
++		hw_send(hw, AVD_FEED, au->data, au->len, NULL, 0, au->pts);
++		if (hw->fed++ < 3 || hw->fed % 600 == 0)
++			fprintf(stderr, "ATL_HWDEC: fed AU #%lu (%zu bytes, pts %" PRId64 ")\n", hw->fed, au->len, au->pts);
++		hw->bytes -= au->len;
++		free(au->data);
++		n++;
++	}
++	if (n) {
++		hw->n_aus -= n;
++		memmove(hw->aus, hw->aus + n, hw->n_aus * sizeof(*hw->aus));
++	}
++}
++
++JNIEXPORT void JNICALL Java_android_media_MediaCodec_native_1set_1video_1size(JNIEnv *env, jobject this, jlong codec, jint width, jint height)
++{
++	struct ATL_codec_context *ctx = _PTR(codec);
++	ctx->hw_width = width;
++	ctx->hw_height = height;
++}
++
+ JNIEXPORT jlong JNICALL Java_android_media_MediaCodec_native_1constructor(JNIEnv *env, jobject this, jstring codec_name)
+ {
+ 	const char *name = (*env)->GetStringUTFChars(env, codec_name, NULL);
+@@ -250,6 +616,12 @@ JNIEXPORT void JNICALL Java_android_media_MediaCodec_native_1configure_1video(JN
+ 	ctx->video.extradata = extradata;
+ 	ctx->video.extradata_size = extradata_size;
+ 
++	if (surface_obj && hwdec_open(ctx, extradata, extradata_size,
++	                              SURFACE_VIEW_WIDGET(gtk_widget_get_first_child(_PTR(_GET_LONG_FIELD(surface_obj, "widget")))))) {
++		ctx->video.surface_view_widget = ctx->hw->widget;
++		return;
++	}
++
+ 	int i = 0;
+ 	while (1) {
+ 		const AVCodecHWConfig *config = avcodec_get_hw_config(codec_ctx->codec, i);
+@@ -283,6 +655,8 @@ JNIEXPORT void JNICALL Java_android_media_MediaCodec_native_1start(JNIEnv *env,
+ 	struct ATL_codec_context *ctx = _PTR(codec);
+ 	AVCodecContext *codec_ctx = ctx->codec;
+ 
++	if (ctx->hw)
++		return;
+ 	if (avcodec_open2(codec_ctx, codec_ctx->codec, NULL) < 0) {
+ 		printf("Codec cannot be found");
+ 	}
+@@ -298,6 +672,8 @@ JNIEXPORT jint JNICALL Java_android_media_MediaCodec_native_1queueInputBuffer(JN
+ 	struct ATL_codec_context *ctx = _PTR(codec);
+ 	AVCodecContext *codec_ctx = ctx->codec;
+ 	AVPacket *pkt = NULL;
++	if (ctx->hw)
++		return hwdec_queue(env, ctx->hw, buffer, presentationTimeUs);
+ 	if (buffer) { // buffer can be null if we're sending EOF
+ 		pkt = av_packet_alloc();
+ 		pkt->size = get_nio_buffer_size(env, buffer);
+@@ -327,6 +703,8 @@ JNIEXPORT jint JNICALL Java_android_media_MediaCodec_native_1dequeueOutputBuffer
+ {
+ 	struct ATL_codec_context *ctx = _PTR(codec);
+ 	AVCodecContext *codec_ctx = ctx->codec;
++	if (ctx->hw)
++		return hwdec_dequeue(env, ctx->hw, buffer, buffer_info);
+ 	AVFrame *frame = av_frame_alloc();
+ 	int ret;
+ 	jarray array_ref;
+@@ -444,6 +822,10 @@ JNIEXPORT void JNICALL Java_android_media_MediaCodec_native_1releaseOutputBuffer
+ 	jbyte *array;
+ 	AVFrame *frame;
+ 
++	if (ctx->hw) {
++		hwdec_release(env, ctx->hw, buffer);
++		return;
++	}
+ 	if (ctx->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
+ 		AVFrame **raw_buffer = get_nio_buffer(env, buffer, &array_ref, &array);
+ 		frame = *raw_buffer;
+@@ -504,12 +886,34 @@ JNIEXPORT void JNICALL Java_android_media_MediaCodec_native_1releaseOutputBuffer
+ JNIEXPORT void JNICALL Java_android_media_MediaCodec_native_1flush(JNIEnv *env, jobject this, jlong codec)
+ {
+ 	struct ATL_codec_context *ctx = _PTR(codec);
++	if (ctx->hw) {
++		hwdec_clear(ctx->hw);
++		hw_send(ctx->hw, AVD_FLUSH, NULL, 0, NULL, 0, 0);
++		return;
++	}
+ 	avcodec_flush_buffers(ctx->codec);
+ }
+ 
+ JNIEXPORT void JNICALL Java_android_media_MediaCodec_native_1release(JNIEnv *env, jobject this, jlong codec)
+ {
+ 	struct ATL_codec_context *ctx = _PTR(codec);
++	if (ctx->hw) {
++		struct hwdec *hw = ctx->hw;
++		ctx->hw = NULL;
++		hw_send(hw, AVD_CLOSE, NULL, 0, NULL, 0, 0);
++		pthread_mutex_lock(&hw->lock);
++		hw->closed = TRUE;
++		close(hw->fd);
++		hw->fd = -1;
++		pthread_mutex_unlock(&hw->lock);
++		hwdec_clear(hw);
++		free(hw->aus);
++		free(hw->csd);
++		hw->aus = NULL;
++		hw->csd = NULL;
++		fprintf(stderr, "ATL_HWDEC: released (%lu AUs fed)\n", hw->fed);
++		g_idle_add(hwdec_close_idle, hw);
++	}
+ 	if (ctx->codec->codec_type == AVMEDIA_TYPE_VIDEO && ctx->video.sws) {
+ 		sws_freeContext(ctx->video.sws);
+ 	}
+diff --git a/src/api-impl-jni/widgets/android_view_SurfaceView.c b/src/api-impl-jni/widgets/android_view_SurfaceView.c
+index ec3d7f56..b4c9b6df 100644
+--- a/src/api-impl-jni/widgets/android_view_SurfaceView.c
++++ b/src/api-impl-jni/widgets/android_view_SurfaceView.c
+@@ -37,7 +37,7 @@ static void surface_view_widget_snapshot(GtkWidget *widget, GdkSnapshot *snapsho
+ {
+ 	SurfaceViewWidget *surface_view_widget = SURFACE_VIEW_WIDGET(widget);
+ #if (GTK_MAJOR_VERSION >= 4 && GTK_MINOR_VERSION >= 22)
+-	if (getenv("ATL_DIRECT_EGL")) {
++	if (surface_view_widget->hole_punch || getenv("ATL_DIRECT_EGL")) {
+ 		graphene_rect_t bounds = GRAPHENE_RECT_INIT(0, 0, gtk_widget_get_width(widget), gtk_widget_get_height(widget));
+ 		/* the exact color doesn't really matter with GSK_PORTER_DUFF_CLEAR */
+ 		GskRenderNode *hole = gsk_color_node_new(&(GdkRGBA){0, 0, 0, 0}, &bounds);
+diff --git a/src/api-impl-jni/widgets/android_view_SurfaceView.h b/src/api-impl-jni/widgets/android_view_SurfaceView.h
+index fc402fee..aa02e6f9 100644
+--- a/src/api-impl-jni/widgets/android_view_SurfaceView.h
++++ b/src/api-impl-jni/widgets/android_view_SurfaceView.h
+@@ -6,6 +6,7 @@ struct _SurfaceViewWidget {
+ 	GtkWidget parent_instance;
+ 	GdkTexture *texture;
+ 	gboolean needs_flip;
++	gboolean hole_punch; /* video plane below (ATL_HWDEC): draw a transparent hole */
+ 	void (*frame_callback)(SurfaceViewWidget *surface_view_widget);
+ 	gpointer frame_callback_data;
+ };
+diff --git a/src/api-impl/android/media/MediaCodec.java b/src/api-impl/android/media/MediaCodec.java
+index 901c5663..db213b86 100644
+--- a/src/api-impl/android/media/MediaCodec.java
++++ b/src/api-impl/android/media/MediaCodec.java
+@@ -62,7 +62,9 @@ public class MediaCodec {
+ 
+ 		if ("aac".equals(codecName) || "mp3".equals(codecName) || "opus".equals(codecName)) {
+ 			native_configure_audio(native_codec, format.getByteBuffer("csd-0"), format.getInteger("sample-rate"), format.getInteger("channel-count"));
+-		} else if ("h264".equals(codecName) || "vp8".equals(codecName) || "vp9".equals(codecName)) {
++		} else if ("h264".equals(codecName) || "hevc".equals(codecName) || "vp8".equals(codecName) || "vp9".equals(codecName)) {
++			native_set_video_size(native_codec, format.containsKey("width") ? format.getInteger("width") : 0,
++			                      format.containsKey("height") ? format.getInteger("height") : 0);
+ 			native_configure_video(native_codec, format.getByteBuffer("csd-0"), format.getByteBuffer("csd-1"), surface);
+ 		} else {
+ 			System.out.println("configure: format " + format + " not implemented");
+@@ -220,6 +222,7 @@ public class MediaCodec {
+ 	private native long native_constructor(String codecName);
+ 	private native void native_configure_audio(long codec, ByteBuffer extradata, int sampleRate, int channelCount);
+ 	private native void native_configure_video(long codec, ByteBuffer csd0, ByteBuffer csd1, Surface surface);
++	private native void native_set_video_size(long codec, int width, int height);
+ 	private native void native_start(long codec);
+ 	private native int native_queueInputBuffer(long codec, ByteBuffer buffer, long presentationTimeUs);
+ 	private native int native_dequeueOutputBuffer(long codec, ByteBuffer buffer, BufferInfo info);
+diff --git a/src/api-impl/android/media/MediaCodecInfo.java b/src/api-impl/android/media/MediaCodecInfo.java
+index ecc4b091..b055b877 100644
+--- a/src/api-impl/android/media/MediaCodecInfo.java
++++ b/src/api-impl/android/media/MediaCodecInfo.java
+@@ -29,6 +29,17 @@ public class MediaCodecInfo {
+ 				new CodecProfileLevel(CodecProfileLevel.AVCProfileBaseline, CodecProfileLevel.AVCLevel61),
+ 				new CodecProfileLevel(CodecProfileLevel.AVCProfileMain, CodecProfileLevel.AVCLevel61),
+ 			};
++			if (MediaCodecList.hwdec()) // TV hardware decoder
++				caps.profileLevels = new CodecProfileLevel[] {
++					new CodecProfileLevel(CodecProfileLevel.AVCProfileBaseline, CodecProfileLevel.AVCLevel51),
++					new CodecProfileLevel(CodecProfileLevel.AVCProfileMain, CodecProfileLevel.AVCLevel51),
++					new CodecProfileLevel(CodecProfileLevel.AVCProfileHigh, CodecProfileLevel.AVCLevel51),
++				};
++		} else if ("video/hevc".equals(type)) {
++			caps.profileLevels = new CodecProfileLevel[] {
++				new CodecProfileLevel(CodecProfileLevel.HEVCProfileMain, CodecProfileLevel.HEVCMainTierLevel51),
++				new CodecProfileLevel(CodecProfileLevel.HEVCProfileMain10, CodecProfileLevel.HEVCMainTierLevel51),
++			};
+ 		}
+ 		return caps;
+ 	}
+diff --git a/src/api-impl/android/media/MediaCodecList.java b/src/api-impl/android/media/MediaCodecList.java
+index 0e0dabb0..e2ca4025 100644
+--- a/src/api-impl/android/media/MediaCodecList.java
++++ b/src/api-impl/android/media/MediaCodecList.java
+@@ -4,8 +4,12 @@ public class MediaCodecList {
+ 
+ 	public MediaCodecList(int kind) {}
+ 
++	static boolean hwdec() {
++		return "1".equals(System.getenv("ATL_HWDEC"));
++	}
++
+ 	public static int getCodecCount() {
+-		return 6;
++		return hwdec() ? 7 : 6;
+ 	}
+ 
+ 	public static MediaCodecInfo getCodecInfoAt(int index) {
+@@ -22,6 +26,8 @@ public class MediaCodecList {
+ 				return new MediaCodecInfo("vp8", "video/x-vnd.on2.vp8");
+ 			case 5:
+ 				return new MediaCodecInfo("vp9", "video/x-vnd.on2.vp9");
++			case 6:
++				return hwdec() ? new MediaCodecInfo("hevc", "video/hevc") : null;
+ 			default:
+ 				return null;
+ 		}
+-- 
+2.43.0
+

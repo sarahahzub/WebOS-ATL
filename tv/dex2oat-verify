@@ -1,0 +1,33 @@
+#!/bin/sh
+# dex2oat with --compiler-filter=verify (22 MB instead of 100+ MB per app, 7 s instead of 68 s on the TV).
+# Passed to ART per app by atld: -X -Xcompiler:/media/developer/webosatl/bin/dex2oat-verify
+# Uses the dex2oat of the mounted runtime.
+# App APK compiles: ART runs the app with ghax.jar + api-impl.jar as parent class loaders, but asks dex2oat for
+# no class-loader context, so it rejected the oat at every launch and verified the APK again in-process
+# ("falling back to extracting"). Pass the runtime context so the oat is accepted (ATL_DEX2OAT_CLC=0 turns it off).
+D=/media/developer/webosatl
+clc=
+if [ "${ATL_DEX2OAT_CLC:-1}" != 0 ]; then
+	apk= bi= nbi=0
+	for a in "$@"; do
+		case "$a" in
+		--class-loader-context=*) apk= nbi=0; break ;;
+		--dex-file=*.apk) apk=1 ;;
+		--boot-image=*) bi=${a#--boot-image=} nbi=$((nbi + 1)) ;;
+		esac
+	done
+	if [ -n "$apk" ] && [ "$nbi" = 1 ]; then
+		case "$bi" in
+		*:*) ;;
+		*)
+			X="${bi%/art/oat/boot.art}/android_translation_layer"
+			[ -f "$X/ghax.jar" ] && [ -f "$X/api-impl.jar" ] && clc="--class-loader-context=PCL[$X/ghax.jar];PCL[$X/api-impl.jar]"
+			;;
+		esac
+	fi
+fi
+for b in "$D/runtime/bin/dex2oat"; do
+	[ -x "$b" ] && exec "$b" "$@" ${clc:+"$clc"} --compiler-filter=verify
+done
+echo "dex2oat-verify: no dex2oat found" >&2
+exit 1

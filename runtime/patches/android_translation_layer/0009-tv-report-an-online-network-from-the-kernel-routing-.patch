@@ -1,0 +1,82 @@
+From b5807255618168e23a69852230afc6b754b9d09d Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 16:05:03 +0530
+Subject: [PATCH 09/42] tv: report an online network from the kernel routing
+ table when NetworkManager is absent (webOS)
+
+---
+ .../android/net/ConnectivityManager.java      | 42 ++++++++++++++++---
+ 1 file changed, 36 insertions(+), 6 deletions(-)
+
+diff --git a/src/api-impl/android/net/ConnectivityManager.java b/src/api-impl/android/net/ConnectivityManager.java
+index 573f47b1..b95ef193 100644
+--- a/src/api-impl/android/net/ConnectivityManager.java
++++ b/src/api-impl/android/net/ConnectivityManager.java
+@@ -12,20 +12,50 @@ public class ConnectivityManager {
+ 	}
+ 
+ 	public NetworkInfo getNetworkInfo(int networkType) {
+-		return new NetworkInfo(nativeGetNetworkAvailable());
++		return new NetworkInfo(hostOnline());
+ 	}
+ 
+ 	public NetworkInfo getActiveNetworkInfo() {
+-		return new NetworkInfo(nativeGetNetworkAvailable());
++		return new NetworkInfo(hostOnline());
+ 	}
+ 
+ 	public void registerNetworkCallback(NetworkRequest request, NetworkCallback callback) { announce(callback); }
+ 
+ 	public void unregisterNetworkCallback(NetworkCallback callback) {}
+ 
+-	public native boolean isActiveNetworkMetered();
+-
+-	protected native boolean nativeGetNetworkAvailable();
++	public boolean isActiveNetworkMetered() { return false; }
++
++		protected native boolean nativeGetNetworkAvailable();
++
++	private static long onlineCheckedAt;
++	private static boolean onlineCached;
++
++	/**
++	 * GLib's NetworkMonitor needs NetworkManager/portal services that do not exist on a TV, so it
++	 * reports "offline" and apps refuse to start any request. A default route in the kernel's table
++	 * means the host can reach the network, which is what Android's "connected" means.
++	 */
++	protected boolean hostOnline() {
++		long now = System.currentTimeMillis();
++		if (now - onlineCheckedAt < 2000)
++			return onlineCached;
++		boolean online = false;
++		try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader("/proc/net/route"))) {
++			String line = r.readLine(); // header
++			while (!online && (line = r.readLine()) != null) {
++				String[] f = line.trim().split("\\s+");
++				if (f.length > 3 && f[1].equals("00000000") && !f[0].equals("lo")) {
++					int flags = Integer.parseInt(f[3], 16);
++					online = (flags & 0x1) != 0; // RTF_UP
++				}
++			}
++		} catch (Exception e) {
++			online = nativeGetNetworkAvailable();
++		}
++		onlineCached = online;
++		onlineCheckedAt = now;
++		return online;
++	}
+ 
+ 	public NetworkInfo[] getAllNetworkInfo() {
+ 		return new NetworkInfo[] {getActiveNetworkInfo()};
+@@ -41,7 +71,7 @@ public class ConnectivityManager {
+ 
+ 	public NetworkCapabilities getNetworkCapabilities(Network network) {
+ 		// as in getActiveNetworkInfo, a null network means there is none to report on
+-		if (network == null || !nativeGetNetworkAvailable())
++		if (network == null || !hostOnline())
+ 			return null;
+ 
+ 		NetworkCapabilities capabilities = new NetworkCapabilities();
+-- 
+2.43.0
+

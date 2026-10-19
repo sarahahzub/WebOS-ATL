@@ -1,0 +1,106 @@
+From 10569a753913afacca91246806e9a215c46903e1 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 16:17:38 +0530
+Subject: [PATCH 13/42] tv: ConnectivityManager.NetworkCallback is a static
+ class (SDK ABI); network callbacks deliver onAvailable/onCapabilitiesChanged
+ with a real Network
+
+---
+ .../android/net/ConnectivityManager.java      | 59 +++++++++++++++++--
+ 1 file changed, 53 insertions(+), 6 deletions(-)
+
+diff --git a/src/api-impl/android/net/ConnectivityManager.java b/src/api-impl/android/net/ConnectivityManager.java
+index b95ef193..1d0df693 100644
+--- a/src/api-impl/android/net/ConnectivityManager.java
++++ b/src/api-impl/android/net/ConnectivityManager.java
+@@ -1,14 +1,23 @@
+ package android.net;
+ 
+ import android.os.Handler;
++import android.os.Looper;
+ 
+ class ProxyInfo {}
+ 
+ public class ConnectivityManager {
+ 
+-	public class NetworkCallback {
++	public static class NetworkCallback {
++		public NetworkCallback() {}
++		public NetworkCallback(int flags) {}
++		public void onPreCheck(Network network) {}
+ 		public void onAvailable(Network network) {}
++		public void onLosing(Network network, int maxMsToLive) {}
+ 		public void onLost(Network network) {}
++		public void onUnavailable() {}
++		public void onCapabilitiesChanged(Network network, NetworkCapabilities networkCapabilities) {}
++		public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties) {}
++		public void onBlockedStatusChanged(Network network, boolean blocked) {}
+ 	}
+ 
+ 	public NetworkInfo getNetworkInfo(int networkType) {
+@@ -19,7 +28,6 @@ public class ConnectivityManager {
+ 		return new NetworkInfo(hostOnline());
+ 	}
+ 
+-	public void registerNetworkCallback(NetworkRequest request, NetworkCallback callback) { announce(callback); }
+ 
+ 	public void unregisterNetworkCallback(NetworkCallback callback) {}
+ 
+@@ -85,11 +93,50 @@ public class ConnectivityManager {
+ 		return capabilities;
+ 	}
+ 
+-	public void registerDefaultNetworkCallback(NetworkCallback cb, Handler hdl) {}
+-
+-	public void registerDefaultNetworkCallback(NetworkCallback cb) {}
+-
+ 	public ProxyInfo getDefaultProxy() { return null; }
+ 
+ 	public LinkProperties getLinkProperties(Network network) { return null; }
++
++	public void registerNetworkCallback(NetworkRequest request, NetworkCallback callback) { deliverAvailable(callback, null); }
++
++	public void registerNetworkCallback(NetworkRequest request, NetworkCallback callback, Handler handler) { deliverAvailable(callback, handler); }
++
++	public void registerDefaultNetworkCallback(NetworkCallback callback) { deliverAvailable(callback, null); }
++
++	public void registerDefaultNetworkCallback(NetworkCallback callback, Handler handler) { deliverAvailable(callback, handler); }
++
++	public void registerBestMatchingNetworkCallback(NetworkRequest request, NetworkCallback callback, Handler handler) { deliverAvailable(callback, handler); }
++
++	public void requestNetwork(NetworkRequest request, NetworkCallback callback) { deliverAvailable(callback, null); }
++
++	public void requestNetwork(NetworkRequest request, NetworkCallback callback, Handler handler) { deliverAvailable(callback, handler); }
++
++	public void requestNetwork(NetworkRequest request, NetworkCallback callback, int timeoutMs) { deliverAvailable(callback, null); }
++
++	public void requestNetwork(NetworkRequest request, NetworkCallback callback, Handler handler, int timeoutMs) { deliverAvailable(callback, handler); }
++
++	public void releaseNetworkRequest(android.app.PendingIntent operation) {}
++
++	/* One network (the host's), always up while the host has a default route: announce it like Android does right
++	   after registration, asynchronously on the callback's handler. */
++	private void deliverAvailable(final NetworkCallback callback, Handler handler) {
++		if (callback == null)
++			return;
++		final Network network = getActiveNetwork();
++		final boolean online = hostOnline();
++		(handler != null ? handler : new Handler(Looper.getMainLooper())).post(new Runnable() {
++			@Override
++			public void run() {
++				if (online) {
++					callback.onAvailable(network);
++					NetworkCapabilities caps = getNetworkCapabilities(network);
++					if (caps != null)
++						callback.onCapabilitiesChanged(network, caps);
++					callback.onBlockedStatusChanged(network, false);
++				} else {
++					callback.onUnavailable();
++				}
++			}
++		});
++	}
+ }
+-- 
+2.43.0
+

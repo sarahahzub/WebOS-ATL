@@ -1,0 +1,32 @@
+From b9dd76fe62e7ed03e338ad3a1091362c74b5186a Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 18:13:14 +0530
+Subject: [PATCH 41/42] tv: View reads XML android:alpha (CloudStream
+ extra_brightness_overlay, alpha=0 white View, covered the video)
+
+---
+ src/api-impl/android/view/View.java | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/api-impl/android/view/View.java b/src/api-impl/android/view/View.java
+index b2fb4ba2..ce008ef9 100644
+--- a/src/api-impl/android/view/View.java
++++ b/src/api-impl/android/view/View.java
+@@ -1054,10 +1054,12 @@ public class View implements Drawable.Callback {
+ 		if (a.hasValue(com.android.internal.R.styleable.View_focusable)) {
+ 			atl_focusable = a.getBoolean(com.android.internal.R.styleable.View_focusable, true);
+ 		}
+-		if (a.hasValue(com.android.internal.R.styleable.View_visibility)) {
++		if (a.hasValue(com.android.internal.R.styleable.View_alpha)) // tv: XML android:alpha (CloudStream brightness overlay)
++			alpha = Math.max(0f, Math.min(1f, a.getFloat(com.android.internal.R.styleable.View_alpha, 1f)));
++		if (a.hasValue(com.android.internal.R.styleable.View_visibility))
+ 			visibility = VISIBILITY_FLAGS[a.getInt(com.android.internal.R.styleable.View_visibility, 0)];
++		if (a.hasValue(com.android.internal.R.styleable.View_visibility) || alpha != 1f)
+ 			native_setVisibility(widget, visibility, alpha, atl_enabled);
+-		}
+ 
+ 		if (a.hasValue(com.android.internal.R.styleable.View_minWidth))
+ 			minWidth = a.getDimensionPixelSize(com.android.internal.R.styleable.View_minWidth, 0);
+-- 
+2.43.0
+

@@ -1,0 +1,30 @@
+From 7880f9ca4cfbc513d175ecb1c2a63460f3421fa3 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 23:00:15 +0530
+Subject: [PATCH 35/42] tv: Dialog(context, themeResId) applies the theme
+ (ContextThemeWrapper, also for its Window) as on Android - FilmPlus link menu
+ was white text on the activity's light window background
+
+---
+ src/api-impl/android/app/Dialog.java | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/src/api-impl/android/app/Dialog.java b/src/api-impl/android/app/Dialog.java
+index 286c059e..d90ab1fd 100644
+--- a/src/api-impl/android/app/Dialog.java
++++ b/src/api-impl/android/app/Dialog.java
+@@ -38,8 +38,9 @@ public class Dialog implements Window.Callback, DialogInterface {
+ 	private OnKeyListener onKeyListener;
+ 
+ 	public Dialog(Context context, int themeResId) {
+-		this.context = context;
+-		window = new Window(context, this);
++		// as Android: an explicit dialog theme wraps the context (the window uses it too)
++		this.context = themeResId != 0 ? new android.view.ContextThemeWrapper(context, themeResId) : context;
++		window = new Window(this.context, this);
+ 		nativePtr = nativeInit(window.getDecorView().widget);
+ 
+ 		window.set_native_window(nativePtr);
+-- 
+2.43.0
+

@@ -1,0 +1,134 @@
+From a79d6040d54ea696f86e18d452586d316888134c Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 04:06:04 +0530
+Subject: [PATCH 27/42] tv: GL forwarding (ATL_GLFWD=1): GSK gl + app EGL/GLES
+ through Mesa virgl vtest (virpipe) to virgl_test_server (started from
+ ATL_GLFWD_SERVER if not listening), software fallback when no server
+
+---
+ src/main-executable/main.c | 95 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 95 insertions(+)
+
+diff --git a/src/main-executable/main.c b/src/main-executable/main.c
+index 4e1e47f9..3a6707f1 100644
+--- a/src/main-executable/main.c
++++ b/src/main-executable/main.c
+@@ -22,6 +22,12 @@
+ #include <stdio.h>
+ #include <sys/resource.h>
+ #include <sys/stat.h>
++#include <signal.h>
++#include <sys/prctl.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <time.h>
++#include <unistd.h>
+ 
+ #ifndef DEFFILEMODE
+ 	#define DEFFILEMODE (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH) /* 0666*/
+@@ -838,6 +844,93 @@ static void pregrow_stack()
+ #pragma GCC diagnostic pop
+ }
+ 
++static int glfwd_probe(const char *path)
++{
++	struct sockaddr_un a = {.sun_family = AF_UNIX};
++	if (strlen(path) >= sizeof(a.sun_path))
++		return 0;
++	strcpy(a.sun_path, path);
++	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++	if (fd < 0)
++		return 0;
++	int ok = connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0;
++	close(fd);
++	return ok;
++}
++
++static int glfwd_env(char **env, int n, const char *name)
++{
++	const char *v = getenv(name);
++	if (v && n < 30)
++		env[n++] = g_strdup_printf("%s=%s", name, v);
++	return n;
++}
++
++/* ATL_GLFWD=1: route all GL (GSK ngl + app EGL/GLES) through virgl vtest; see tvpatches/glfwd.py */
++static void glfwd_setup(void)
++{
++	const char *on = getenv("ATL_GLFWD");
++	if (!on || strcmp(on, "1"))
++		return;
++	char *sock = g_strdup(getenv("ATL_GLFWD_SOCK") ?: getenv("VTEST_SOCKET_NAME") ?: "");
++	if (!*sock) {
++		g_free(sock);
++		sock = g_strdup_printf("%s/atlgl-%d.sock", getenv("XDG_RUNTIME_DIR") ?: "/tmp", getpid());
++	}
++	int ok = glfwd_probe(sock);
++	const char *srv = getenv("ATL_GLFWD_SERVER") ?: "/media/developer/atl/gpu/virgl_test_server";
++	if (!ok && access(srv, X_OK) == 0) {
++		unlink(sock);
++		pid_t pid = fork();
++		if (pid == 0) {
++			prctl(PR_SET_PDEATHSIG, SIGTERM);
++			const char *log = getenv("ATL_GLFWD_LOG") ?: "/dev/null";
++			/* (main.c has its own static open(), so no fcntl.h here) */
++			if (freopen(log, "w", stdout))
++				dup2(fileno(stdout), 2);
++			char *argv[40] = {(char *)srv, "--use-gles", "--socket-path", sock};
++			int argc = 4;
++			char **extra = g_strsplit(getenv("ATL_GLFWD_SERVER_ARGS") ?: "", " ", 32);
++			for (char **e = extra; *e && argc < 38; e++)
++				if (**e)
++					argv[argc++] = *e;
++			argv[argc] = NULL;
++			/* clean environment: the AppDir's Mesa/glvnd/LD_* settings would break the host (TV) EGL stack */
++			char *env[32];
++			int n = 0;
++			n = glfwd_env(env, n, "PATH");
++			n = glfwd_env(env, n, "HOME");
++			n = glfwd_env(env, n, "XDG_RUNTIME_DIR");
++			n = glfwd_env(env, n, "VREND_DEBUG");
++			char **pass = g_strsplit(getenv("ATL_GLFWD_SERVER_ENV") ?: "", " ", 16);
++			for (char **e = pass; *e && n < 30; e++)
++				if (strchr(*e, '='))
++					env[n++] = *e;
++			env[n] = NULL;
++			execve(srv, argv, env);
++			_exit(127);
++		}
++		if (pid > 0) {
++			int wait_ms = atoi(getenv("ATL_GLFWD_WAIT_MS") ?: "2000");
++			for (int t = 0; t < wait_ms && !(ok = glfwd_probe(sock)); t += 20)
++				nanosleep(&(struct timespec){0, 20 * 1000 * 1000}, NULL);
++			if (!ok)
++				kill(pid, SIGKILL);
++		}
++	}
++	if (!ok) {
++		fprintf(stderr, "ATL_GLFWD: no vtest server at %s (server %s), keeping software rendering\n", sock, srv);
++		g_free(sock);
++		return;
++	}
++	setenv("GALLIUM_DRIVER", "virpipe", 1);
++	setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1);
++	setenv("VTEST_SOCKET_NAME", sock, 1);
++	setenv("GSK_RENDERER", getenv("ATL_GLFWD_GSK") ?: "gl", 1);
++	fprintf(stderr, "ATL_GLFWD: GL via virgl vtest %s, GSK_RENDERER=%s\n", sock, getenv("GSK_RENDERER"));
++	g_free(sock);
++}
++
+ int main(int argc, char **argv)
+ {
+ 	GtkApplication *app;
+@@ -845,6 +938,8 @@ int main(int argc, char **argv)
+ 
+ 	pregrow_stack();
+ 
++	glfwd_setup();
++
+ 	/* this has to be done in the main executable, so might as well do it here */
+ 	init__r_debug();
+ 
+-- 
+2.43.0
+

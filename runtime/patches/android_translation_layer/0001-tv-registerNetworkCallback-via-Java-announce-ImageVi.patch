@@ -1,0 +1,69 @@
+From cf2cfaba639b46f9b0f92e0cbea11928f123c0dc Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 16:04:37 +0530
+Subject: [PATCH 01/42] tv: registerNetworkCallback via Java announce();
+ ImageView.setImageResource handles color/xml resources
+
+---
+ .../android/net/ConnectivityManager.java      |  2 +-
+ src/api-impl/android/widget/ImageView.java    | 29 +++++++++++++++++--
+ 2 files changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/src/api-impl/android/net/ConnectivityManager.java b/src/api-impl/android/net/ConnectivityManager.java
+index 405707ae..573f47b1 100644
+--- a/src/api-impl/android/net/ConnectivityManager.java
++++ b/src/api-impl/android/net/ConnectivityManager.java
+@@ -19,7 +19,7 @@ public class ConnectivityManager {
+ 		return new NetworkInfo(nativeGetNetworkAvailable());
+ 	}
+ 
+-	public native void registerNetworkCallback(NetworkRequest request, NetworkCallback callback);
++	public void registerNetworkCallback(NetworkRequest request, NetworkCallback callback) { announce(callback); }
+ 
+ 	public void unregisterNetworkCallback(NetworkCallback callback) {}
+ 
+diff --git a/src/api-impl/android/widget/ImageView.java b/src/api-impl/android/widget/ImageView.java
+index 93153170..ca1d961f 100644
+--- a/src/api-impl/android/widget/ImageView.java
++++ b/src/api-impl/android/widget/ImageView.java
+@@ -53,11 +53,34 @@ public class ImageView extends View {
+ 	}
+ 
+ 	public void setImageResource(final int resid) {
+-		if (this.getResources().getString(resid).endsWith(".xml")) {
+-			setImageDrawable(getContext().getDrawable(resid));
++		if (resid == 0) {
++			setImageDrawable(null);
+ 			return;
+ 		}
+-		bitmap = BitmapFactory.decodeResource(this.getResources(), resid);
++		String path = null;
++		try {
++			path = this.getResources().getString(resid);
++		} catch (Throwable t) {
++		}
++		if (path == null || path.endsWith(".xml")) { // color / xml / unknown: go through the drawable machinery
++			try {
++				Drawable d = getContext().getDrawable(resid);
++				if (d != null) {
++					setImageDrawable(d);
++					return;
++				}
++			} catch (Throwable t) {
++			}
++			if (path == null) {
++				setImageDrawable(null);
++				return;
++			}
++		}
++		try {
++			bitmap = BitmapFactory.decodeResource(this.getResources(), resid);
++		} catch (RuntimeException e) {
++			bitmap = null;
++		}
+ 		native_setDrawable(widget, bitmap != null ? bitmap.getTexture() : 0);
+ 	}
+ 	public void setAdjustViewBounds(boolean adjustViewBounds) {}
+-- 
+2.43.0
+

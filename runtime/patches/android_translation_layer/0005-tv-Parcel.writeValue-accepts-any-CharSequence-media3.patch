@@ -1,0 +1,27 @@
+From b54cc71ad0772653c166994e7e03586eb24911e5 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 16:04:37 +0530
+Subject: [PATCH 05/42] tv: Parcel.writeValue accepts any CharSequence (media3
+ subtitle cues)
+
+---
+ src/api-impl/android/os/Parcel.java | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/api-impl/android/os/Parcel.java b/src/api-impl/android/os/Parcel.java
+index 52bcfe8c..b75a0d82 100644
+--- a/src/api-impl/android/os/Parcel.java
++++ b/src/api-impl/android/os/Parcel.java
+@@ -844,6 +844,9 @@ public class Parcel {
+ 		} else if (value instanceof String) {
+ 			writeInt(8);
+ 			writeString((String)value);
++		} else if (value instanceof CharSequence) { // Spanned etc: keep the text only
++			writeInt(8);
++			writeString(value.toString());
+ 		} else if (value instanceof byte[]) {
+ 			writeInt(9);
+ 			writeByteArray((byte[])value);
+-- 
+2.43.0
+

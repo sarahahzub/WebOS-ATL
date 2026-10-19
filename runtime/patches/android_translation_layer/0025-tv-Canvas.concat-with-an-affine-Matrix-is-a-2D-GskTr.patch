@@ -1,0 +1,36 @@
+From 9603b54a476e800ba049b597ded87f00b2e6276b Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 16:13:00 +0530
+Subject: [PATCH 25/42] tv: Canvas.concat with an affine Matrix is a 2D
+ GskTransform - the cairo renderer (Bitmaps rendered off the main thread) drew
+ UNKNOWN-category transforms hot pink, so Glide CenterCrop/FitCenter
+ thumbnails were pink (SmartTube, FilmPlus)
+
+---
+ src/api-impl-jni/graphics/android_atl_GskCanvas.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/api-impl-jni/graphics/android_atl_GskCanvas.c b/src/api-impl-jni/graphics/android_atl_GskCanvas.c
+index 8159099d..cece4b64 100644
+--- a/src/api-impl-jni/graphics/android_atl_GskCanvas.c
++++ b/src/api-impl-jni/graphics/android_atl_GskCanvas.c
+@@ -190,7 +190,15 @@ JNIEXPORT void JNICALL Java_android_atl_GskCanvas_native_1concat(JNIEnv *env, jc
+ {
+ 	GdkSnapshot *snapshot = GTK_SNAPSHOT(_PTR(snapshot_ptr));
+ 	graphene_matrix_t *matrix = (graphene_matrix_t *)_PTR(matrix_ptr);
+-	gtk_snapshot_transform_matrix(snapshot, matrix);
++	double xx, yx, xy, yy, dx, dy;
++	if (graphene_matrix_is_2d(matrix) && graphene_matrix_to_2d(matrix, &xx, &yx, &xy, &yy, &dx, &dy)) {
++		// 2D category: the cairo renderer (used for Bitmaps rendered off the main thread) draws UNKNOWN-category transforms pink
++		GskTransform *transform = gsk_transform_matrix_2d(NULL, xx, yx, xy, yy, dx, dy);
++		gtk_snapshot_transform(snapshot, transform);
++		gsk_transform_unref(transform);
++	} else {
++		gtk_snapshot_transform_matrix(snapshot, matrix);
++	}
+ }
+ 
+ JNIEXPORT void JNICALL Java_android_atl_GskCanvas_native_1clipRect(JNIEnv *env, jclass this_class, jlong snapshot_ptr, jfloat left, jfloat top, jfloat right, jfloat bottom)
+-- 
+2.43.0
+

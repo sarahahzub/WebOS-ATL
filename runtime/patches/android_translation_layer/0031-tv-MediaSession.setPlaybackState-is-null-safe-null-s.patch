@@ -1,0 +1,47 @@
+From d8ff056eceddb298d6e6d18efd03e65574b98216 Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 22:12:18 +0530
+Subject: [PATCH 31/42] tv: MediaSession.setPlaybackState is null-safe (null
+ state, null queue item description/title/subtitle) - media3 apps with a queue
+ died in loadExo (CloudStream player)
+
+---
+ .../android/media/session/MediaSession.java       | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/src/api-impl/android/media/session/MediaSession.java b/src/api-impl/android/media/session/MediaSession.java
+index df1b9a52..18455236 100644
+--- a/src/api-impl/android/media/session/MediaSession.java
++++ b/src/api-impl/android/media/session/MediaSession.java
+@@ -47,16 +47,25 @@ public class MediaSession {
+ 
+ 	public void setActive(boolean active) {}
+ 
++	private static String str(Object o) {
++		return o == null ? null : o.toString();
++	}
++
+ 	public void setPlaybackState(PlaybackState state) {
++		if (state == null)
++			return;
+ 		String title = null;
+ 		String subTitle = null;
+ 		String artUrl = null;
+ 		if (queue != null)
+ 			for (QueueItem item : queue) {
+ 				if (item.id == state.activeQueueItemId) {
+-					title = item.description.title.toString();
+-					subTitle = item.description.subtitle.toString();
+-					artUrl = item.description.iconUri == null ? null : item.description.iconUri.toString();
++					MediaDescription d = item.description;
++					if (d != null) {
++						title = str(d.title);
++						subTitle = str(d.subtitle);
++						artUrl = str(d.iconUri);
++					}
+ 					break;
+ 				}
+ 			}
+-- 
+2.43.0
+

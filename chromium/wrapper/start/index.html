@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Chromium start</title>
+<!-- TV start page (browser.sqfs ghb/start/). The title must start with "Chromium start": BACK here closes the browser (brwl). -->
+<style>
+ html, body { margin: 0; height: 100%; background: #14161c; color: #e8eaf0; font-family: "DejaVu Sans", sans-serif; }
+ main { max-width: 1160px; margin: 0 auto; padding: 24px 40px; }
+ h1 { font-size: 32px; font-weight: 600; margin: 0 0 18px; }
+ form { display: flex; gap: 14px; margin-bottom: 24px; }
+ input { flex: 1; font-size: 26px; padding: 14px 20px; border-radius: 14px; border: 2px solid #3a3f4c; background: #1f222b; color: #fff; }
+ input:focus { border-color: #4f8cff; outline: none; }
+ button { font-size: 24px; padding: 0 28px; border-radius: 14px; border: 0; background: #4f8cff; color: #fff; }
+ .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
+ a.tile { display: flex; flex-direction: column; justify-content: flex-end; height: 128px; padding: 18px 24px; border-radius: 18px;
+          color: #fff; text-decoration: none; font-size: 30px; font-weight: 600; box-sizing: border-box; border: 4px solid transparent; }
+ a.tile small { font-size: 18px; font-weight: 400; opacity: .85; margin-top: 6px; }
+ a.tile:hover, a.tile:focus { border-color: #fff; outline: none; }
+ .yt { background: #c4302b; } .gg { background: #3367d6; } .wp { background: #5b5f66; }
+ .gn { background: #1a7f5a; } .bbc { background: #8a1c1c; } .rd { background: #d6521f; }
+ p.help { margin-top: 22px; font-size: 18px; color: #9aa0ad; line-height: 1.6; }
+ kbd { background: #2a2e39; border-radius: 6px; padding: 1px 8px; color: #e8eaf0; }
+</style>
+</head>
+<body>
+<main>
+ <h1>Chromium</h1>
+ <form action="https://www.google.com/search" method="get">
+  <input id="q" name="q" type="search" placeholder="Search Google or type in the address bar" autocomplete="off">
+  <button type="submit">Search</button>
+ </form>
+ <div class="tiles">
+  <a class="tile yt" id="t-youtube" href="https://www.youtube.com/">YouTube<small>youtube.com</small></a>
+  <a class="tile gg" id="t-google" href="https://www.google.com/">Google<small>google.com</small></a>
+  <a class="tile wp" id="t-wikipedia" href="https://en.wikipedia.org/wiki/Main_Page">Wikipedia<small>en.wikipedia.org</small></a>
+  <a class="tile gn" id="t-gnews" href="https://news.google.com/">Google News<small>news.google.com</small></a>
+  <a class="tile bbc" id="t-bbc" href="https://www.bbc.com/news">BBC News<small>bbc.com/news</small></a>
+  <a class="tile rd" id="t-reddit" href="https://www.reddit.com/">Reddit<small>reddit.com</small></a>
+ </div>
+ <p class="help">
+  <kbd>Arrows</kbd> move the pointer, <kbd>OK</kbd> clicks, <kbd>CH +/-</kbd> scroll, <kbd>BACK</kbd> goes back
+  (on this page it closes the browser), hold <kbd>BACK</kbd> to close it anywhere.
+  Click a text field or the address bar to type with the on-screen keyboard.
+  <kbd>RED</kbd> switches the arrows between pointer and link-to-link moves.
+ </p>
+</main>
+</body>
+</html>
