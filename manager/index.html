@@ -83,6 +83,7 @@ input:focus{border-color:#3ddc84}
  <button id="b-install">Install</button><button id="b-exit">Exit</button>
  <pre id="setuplog" tabindex="0"></pre></div>
 <div id="toast"></div>
+<script src="token.js"></script>
 <div id="confirm"><div><p id="cmsg"></p><button id="cyes" class="danger">Yes</button><button id="cno">Cancel</button></div></div>
 <script>
 const API = location.protocol.startsWith('http') ? '' : 'http://127.0.0.1:8791';
@@ -110,8 +111,15 @@ function rootRun(cmd, onLine) {
 }
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 let page = 'status', detailId = null, apps = [], st = null, sets = null;
+/* token.js (written by the agent into this app's folder) authorizes the API; reloaded after setup / app updates */
+function loadToken() {
+  return new Promise(res => { const e = document.createElement('script'); e.src = 'token.js?t=' + Date.now();
+    e.onload = e.onerror = () => { e.remove(); res(); }; document.head.appendChild(e); });
+}
+const tok = () => encodeURIComponent(window.ATL_TOKEN || '');
 function api(p, o) {
-  return fetch(API + p, o).then(r => r.headers.get('content-type')?.includes('json') ? r.json() : r.text());
+  o = Object.assign({}, o); o.headers = Object.assign({'X-Token': window.ATL_TOKEN || ''}, o.headers || {});
+  return fetch(API + p, o).then(r => { if (r.status == 403) throw new Error('not authorized'); return r; }).then(r => r.headers.get('content-type')?.includes('json') ? r.json() : r.text());
 }
 const post = (p, body) => api(p, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})});
 function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('on'), 4000); }
@@ -134,12 +142,12 @@ function card(k, v, cls) { return `<div class="card"><div class="k">${k}</div><d
 function loadStatus() {
   return api('/api/status').then(s => {
     st = s; $('#ver').textContent = 'Version ' + s.version;
-    $$('.ip').forEach(e => e.textContent = s.apkweb_url);
+    $$('.ip').forEach(e => e.textContent = s.apkweb_url + (s.apkweb_pin ? '  (PIN ' + s.apkweb_pin + ')' : ''));
     const d = s.disk || {}, m = s.mem || {}, r = s.runtime || {};
     const upd = s.latest && s.latest != s.version && s.latest != s.payload_version;
     $('#cards').innerHTML = card('Android runtime', r.mounted ? (r.version || 'ready') + (r.ok ? '' : ' (update pending)') : (s.progress.state == 'downloading' ? 'downloading…' : 'not installed'), r.mounted ? 'ok' : 'warn') +
       card('App service', s.atld ? 'running' : 'stopped', s.atld ? 'ok' : 'bad') +
-      card('Phone install page', s.apkweb ? s.apkweb_url : 'stopped', s.apkweb ? 'ok' : 'bad') +
+      card('Phone install page' + (s.apkweb_pin ? ' · PIN ' + s.apkweb_pin : ''), s.apkweb ? s.apkweb_url : 'stopped', s.apkweb ? 'ok' : 'bad') +
       card('Free space', (d.free_mb / 1024).toFixed(2) + ' GB of ' + (d.total_mb / 1024).toFixed(1), d.free_mb < 300 ? 'warn' : '') +
       card('Memory free', (m.avail_mb || '?') + ' of ' + (m.total_mb || '?') + ' MB') +
       card('webOS ATL', s.version + (upd ? ' · ' + s.latest + ' available' : ''), upd ? 'warn' : '');
@@ -164,7 +172,7 @@ $('#b-force').onclick = async () => { if (await confirmBox('Close the running An
 $('#b-remove').onclick = async () => {
   if (!await confirmBox('Remove webOS ATL, every Android app installed with it and their data?')) return;
   toast('Uninstalling…');
-  rootRun('sh ' + PAYLOAD + '/uninstall.sh', l => {}).then(rc => { toast(rc == 0 ? 'Removed. Remove "webOS ATL" in Homebrew Channel to delete this app too.' : 'Uninstall failed (rc ' + rc + ')'); setTimeout(() => location.reload(), 5000); })
+  rootRun('sh "' + PAYLOAD + '/uninstall.sh"', l => {}).then(rc => { toast(rc == 0 ? 'Removed. Remove "webOS ATL" in Homebrew Channel to delete this app too.' : 'Uninstall failed (rc ' + rc + ')'); setTimeout(() => location.reload(), 5000); })
     .catch(() => post('/api/uninstall-all').then(r => toast(r.msg || r.error)));
 };
 $('#b-url').onclick = () => { const u = $('#url').value.trim(); if (!/^https?:\/\//.test(u)) return toast('Type an http(s) link to an .apk');
@@ -177,9 +185,9 @@ function poll() { let n = 0; const t = setInterval(() => api('/api/progress').th
 function loadApps() {
   return api('/api/apps').then(a => {
     apps = a;
-    $('#applist').innerHTML = a.map(x => `<div class="app" tabindex="0" data-id="${x.id}"><img src="${API}/api/icon?id=${x.id}&t=${Date.now()}"><div class="t">${esc(x.title)}</div><div class="s">${x.running ? 'running · ' : ''}${(x.apk_mb + x.data_mb).toFixed(0)} MB</div></div>`).join('') || '<div class="hint">No Android apps yet.</div>';
+    $('#applist').innerHTML = a.map(x => `<div class="app" tabindex="0" data-id="${x.id}"><img src="${API}/api/icon?id=${x.id}&tok=${tok()}&t=${Date.now()}"><div class="t">${esc(x.title)}</div><div class="s">${x.running ? 'running · ' : ''}${(x.apk_mb + x.data_mb).toFixed(0)} MB</div></div>`).join('') || '<div class="hint">No Android apps yet.</div>';
     $$('.app').forEach(e => e.onclick = () => openDetail(e.dataset.id));
-    if (st) $$('.ip').forEach(e => e.textContent = st.apkweb_url);
+    if (st) $$('.ip').forEach(e => e.textContent = st.apkweb_url + (st.apkweb_pin ? '  (PIN ' + st.apkweb_pin + ')' : ''));
   });
 }
 const OPTS = [
@@ -193,7 +201,7 @@ function openDetail(id) {
   const a = apps.find(x => x.id == id); if (!a) return; detailId = id;
   const c = a.conf || {};
   $('#listwrap').style.display = 'none'; const d = $('#detail'); d.classList.add('on');
-  d.innerHTML = `<div class="dhead"><img src="${API}/api/icon?id=${id}&t=${Date.now()}"><div><div class="t">${esc(a.title)}</div>
+  d.innerHTML = `<div class="dhead"><img src="${API}/api/icon?id=${id}&tok=${tok()}&t=${Date.now()}"><div><div class="t">${esc(a.title)}</div>
     <div class="s">${esc(c.PKG || '')} · APK ${a.apk_mb} MB · data ${a.data_mb} MB${c.LEANBACK ? ' · Android TV app' : ''}</div></div></div>
     <div class="row"><button data-a="launch">Open</button><button data-a="stop">Stop</button><button data-a="reicon">Refresh icon</button>
     <button data-a="log">App log</button><button data-a="clear" class="danger">Clear data</button><button data-a="uninstall" class="danger">Uninstall</button></div>` +
@@ -297,22 +305,27 @@ $('#b-exit').onclick = exitApp;
 $('#b-install').onclick = () => {
   const b = $('#b-install'); b.disabled = true; $('#setuplog').textContent = '';
   let ok = false;
-  rootRun('sh ' + PAYLOAD + '/install.sh 2>&1', l => { setupLog(l); if (/^OK /.test(l)) ok = true; })
+  rootRun('sh "' + PAYLOAD + '/install.sh" 2>&1', l => { setupLog(l); if (/^OK /.test(l)) ok = true; })
     .then(rc => {
       if (!ok) { b.disabled = false; setupLog('Setup failed (rc ' + rc + ').'); return; }
       setupLog('Starting…'); let n = 0;
-      const t = setInterval(() => loadStatus().then(() => { clearInterval(t); $('#setup').classList.remove('on'); show('status'); $('.tab.on').focus(); poll(); })
+      const t = setInterval(() => loadToken().then(loadStatus).then(() => { clearInterval(t); $('#setup').classList.remove('on'); show('status'); $('.tab.on').focus(); poll(); })
         .catch(() => { if (++n > 30) { clearInterval(t); b.disabled = false; setupLog('The agent did not start; see /media/developer/webosatl/logs'); } }), 1000);
     })
     .catch(e => { b.disabled = false; setupLog('Error: ' + e.message); });
 };
 function boot(tries) {
-  loadStatus().then(s => {
+  (window.ATL_TOKEN ? Promise.resolve() : loadToken()).then(loadStatus).then(s => {
     $('.tab.on').focus();
     if (s.payload_version && s.payload_version != s.version) post('/api/update');  // the app was just updated
-  }).catch(() => tries > 0 ? setTimeout(() => boot(tries - 1), 1000) : showSetup());
+  }).catch(e => {
+    // agent up but token.js not (re)written yet (just updated): wait for it; agent not running: setup
+    const auth = e && e.message == 'not authorized';
+    if (tries > 0 && (auth || tries > 8)) setTimeout(() => { if (auth) window.ATL_TOKEN = ''; boot(tries - 1); }, 1000);
+    else showSetup();
+  });
 }
-boot(2);
+boot(10);
 setInterval(() => { if (page == 'status' && !$('#setup').classList.contains('on')) loadStatus().catch(() => {}); }, 5000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadStatus(); if (page == 'apps' && !detailId) loadApps(); } });
 </script></body></html>

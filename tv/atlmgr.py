@@ -10,25 +10,30 @@
    installs its root helper browserd.sh in /media/developer/webosatl/chromium and starts it; removes it all again when
    the add-on app is uninstalled.
 4. Local API on http://127.0.0.1:8791/ for the manager app: status, Android apps (settings, icons, uninstall, clear
-   data, install from a link), global settings, logs, uninstall everything.
+   data, install from a link), global settings, logs, uninstall everything. Every request needs the token that atlmgr
+   writes into the manager app's own folder (token.js): a web page open in the TV's browser can reach 127.0.0.1 but
+   can't read that file, so it can't install or remove anything.
 
   atlmgr.py                 run the agent
   atlmgr.py runtime-update  download + install the runtime now (prints progress), for scripts
 """
-import hashlib, json, os, re, shutil, socket, ssl, subprocess, sys, threading, time, traceback, urllib.request
+import hashlib, hmac, json, os, re, secrets, shutil, socket, ssl, subprocess, sys, tempfile, threading, time, traceback
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from conf import (BASE, BIN, RUNTIME, RUNTIME_IMG, HOME, APKS, LOGS, SETTINGS_F, APPS, PREFIX, MANAGER_ID,  # noqa
-                  PAYLOAD, MGR_PORT, APKWEB_PORT, version, ensure_dirs)
+                  PAYLOAD, MANAGER_DIR, MGR_PORT, APKWEB_PORT, version, ensure_dirs)
 
 ensure_dirs()
 RUNTIME_STATE = BASE + "/runtime.json"   # {"sha256", "version"} of the installed runtime image
 LOG_F = LOGS + "/atlmgr.log"
 REPO = "sarahahzub/WebOS-ATL"
 LATEST_URL = "https://raw.githubusercontent.com/%s/main/repo/manifest.json" % REPO  # newest manager app (Homebrew)
-DEFAULTS = {"env": {"ATL_DENSITY": "320", "ATL_IS_TELEVISION": "1"}, "dex2oat": "verify", "mgr_lan": False}
+DEFAULTS = {"env": {"ATL_DENSITY": "320", "ATL_IS_TELEVISION": "1"}, "dex2oat": "verify"}
+TOKEN_F = BASE + "/mgr.token"
+KEEP_FREE_MB = 150  # never fill /media/developer: downloads leave at least this much free
 # apk.conf keys the manager UI may edit
 APP_KEYS = re.compile(r"^(ACTIVITY|ARGS|DPAD|SOFTCURSOR|HOVER|DIALOG_TYPE|SHIM_DEBUG|GSK_RENDERER|WEBVIEW|"
                       r"VIDEO_EXPORT|SHIM_ENV|VDEC_ENV|ENV_[A-Z0-9_]+)$")
@@ -198,6 +203,49 @@ def urlopen(url, headers=None, timeout=60):
         raise
 
 
+def token():
+    try:
+        t = open(TOKEN_F).read().strip()
+        if len(t) >= 32:
+            return t
+    except OSError:
+        pass
+    t = secrets.token_hex(24)
+    fd = os.open(TOKEN_F + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(t + "\n")
+    os.replace(TOKEN_F + ".tmp", TOKEN_F)
+    return t
+
+
+def write_token_js():
+    """the manager app loads token.js from its own folder (rewritten after every app update: the install replaces it)"""
+    if not os.path.isdir(MANAGER_DIR):
+        return
+    js = "window.ATL_TOKEN = %s;\n" % json.dumps(token())
+    f = MANAGER_DIR + "/token.js"
+    try:
+        if open(f).read() == js:
+            return
+    except OSError:
+        pass
+    with open(f + ".tmp", "w") as o:
+        o.write(js)
+    os.chmod(f + ".tmp", 0o644)
+    os.replace(f + ".tmp", f)
+
+
+def token_loop():
+    """a manager app update (Homebrew Channel) replaces its folder: put token.js back within seconds"""
+    while True:
+        time.sleep(3)
+        try:
+            if not os.path.exists(MANAGER_DIR + "/token.js"):
+                write_token_js()
+        except Exception:
+            pass
+
+
 def set_progress(**kw):
     progress.update(kw, time=time.time())
 
@@ -347,8 +395,8 @@ def _runtime_update(force, out):
         have = os.path.getsize(dl + ".part") if os.path.exists(dl + ".part") else 0
         need = (size - have) >> 20
         free = disk().get("free_mb", 0)
-        if need + 50 > free:
-            raise RuntimeError("not enough space: the runtime needs %d MB more, %d MB free" % (need + 50, free))
+        if need + KEEP_FREE_MB > free:
+            raise RuntimeError("not enough space: the runtime needs %d MB free, %d MB free" % (need + KEEP_FREE_MB, free))
         last = [0]
 
         def cb(done, total, speed):
@@ -436,8 +484,18 @@ def sync_chromium(force=False):
             if _gone[0] >= 3:  # removed in Homebrew Channel: remove its image, helper and profile too
                 log("Chromium add-on uninstalled: removing", CB)
                 browserd("stop")
-                sh("pkill -f %s/mnt/ 2>/dev/null; sleep 1; umount %s/mnt 2>/dev/null || umount -l %s/mnt 2>/dev/null"
-                   % (CB, CB, CB), 60)
+                for pid, a in procs():  # Chromium processes run from the image
+                    if a[0].startswith(CB + "/mnt/"):
+                        try:
+                            os.kill(pid, 9)
+                        except OSError:
+                            pass
+                time.sleep(1)
+                rc, _ = sh("umount %s/mnt 2>/dev/null || umount -l %s/mnt 2>/dev/null; ! grep -q ' %s/mnt ' /proc/mounts"
+                           % (CB, CB, CB), 60)
+                if rc != 0:
+                    log("Chromium image still mounted; not removing", CB)
+                    return
                 shutil.rmtree(CB, ignore_errors=True)
                 _gone[0] = 0
         return
@@ -466,9 +524,9 @@ def sync_chromium(force=False):
             if not (os.path.exists(dl) and os.path.getsize(dl) == size and sha_file(dl) == img["sha256"]):
                 have = os.path.getsize(dl + ".part") if os.path.exists(dl + ".part") else 0
                 free = disk().get("free_mb", 0)
-                if ((size - have) >> 20) + 50 > free:
+                if ((size - have) >> 20) + KEEP_FREE_MB > free:
                     set_progress(state="error", msg="Chromium needs %d MB free, %d MB free"
-                                 % (((size - have) >> 20) + 50, free))
+                                 % (((size - have) >> 20) + KEEP_FREE_MB, free))
                     return
                 log("Chromium image download", img.get("url"))
 
@@ -514,6 +572,10 @@ def check_latest():
 def update_loop():
     time.sleep(5)
     while True:
+        try:
+            write_token_js()
+        except Exception:
+            log("token.js failed", traceback.format_exc())
         try:
             sync_payload()
         except Exception:
@@ -653,14 +715,14 @@ def reicon(which="all"):
 
 
 def uninstall_all(keep_data=False):
-    """runs uninstall.sh detached (it stops atlmgr too)"""
+    """runs uninstall.sh detached from a private copy (it deletes BIN and stops atlmgr too)"""
     log("uninstall everything", "keep data" if keep_data else "")
-    src = BIN + "/uninstall.sh"
-    tmp = "/tmp/webosatl-uninstall.sh"
-    shutil.copyfile(src, tmp)
-    subprocess.Popen("cp %s/env.sh /tmp/env.sh; sh %s %s > /tmp/webosatl-uninstall.log 2>&1"
-                     % (BIN, tmp, "--keep-data" if keep_data else ""), shell=True, start_new_session=True,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    d = tempfile.mkdtemp(prefix="webosatl-uninstall-")  # 0700, root only
+    for n in ("uninstall.sh", "env.sh"):
+        shutil.copyfile("%s/%s" % (BIN, n), "%s/%s" % (d, n))
+    args = ["sh", d + "/uninstall.sh"] + (["--keep-data"] if keep_data else [])
+    subprocess.Popen(args, start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=open(d + "/uninstall.log", "w"), stderr=subprocess.STDOUT)
     return "uninstalling"
 
 
@@ -676,6 +738,7 @@ def status():
                         "ok": runtime_ok()},
             "atld": bool(py_running("atld.py")), "apkweb": bool(py_running("apkweb.py")),
             "apkweb_url": "http://%s:%d/" % (tv_ip() or "<tv-ip>", APKWEB_PORT),
+            "apkweb_pin": (open(BASE + "/apkweb.pin").read().strip() if os.path.exists(BASE + "/apkweb.pin") else ""),
             "browser": chromium_state(),
             "progress": progress, "settings": settings(), "repo": "https://github.com/" + REPO}
 
@@ -720,7 +783,7 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Token")
         self.end_headers()
         self.wfile.write(b)
 
@@ -732,8 +795,15 @@ class H(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.out(204, b"")
 
+    def authed(self, q):
+        """X-Token header (fetch) or tok= parameter (<img src>): the token from the manager app's token.js"""
+        t = self.headers.get("X-Token") or q.get("tok") or ""
+        return hmac.compare_digest(t.encode(), token().encode())
+
     def do_GET(self):
         path, q = self.q()
+        if not self.authed(q):
+            return self.out(403, {"error": "token needed (open the webOS ATL app)"})
         try:
             if path == "/api/status":
                 return self.out(200, status())
@@ -754,6 +824,8 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path, q = self.q()
+        if not self.authed(q):
+            return self.out(403, {"error": "token needed (open the webOS ATL app)"})
         try:
             n = int(self.headers.get("Content-Length", "0") or 0)
             body = json.loads(self.rfile.read(n) or b"{}") if n else {}
@@ -816,12 +888,15 @@ def main():
         print(("OK " if ok else "ERROR ") + msg)
         sys.exit(0 if ok else 1)
     log("== atlmgr %s start (pid %d)" % (version(), os.getpid()))
+    token()
+    write_token_js()
     try:
-        srv = Server(("0.0.0.0" if settings().get("mgr_lan") else "127.0.0.1", MGR_PORT), H)
+        srv = Server(("127.0.0.1", MGR_PORT), H)  # TV only
     except OSError as e:
         log("port %d busy (%s): another atlmgr running? exiting" % (MGR_PORT, e))
         return
     threading.Thread(target=update_loop, daemon=True).start()
+    threading.Thread(target=token_loop, daemon=True).start()
     srv.serve_forever()
 
 

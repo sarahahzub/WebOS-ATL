@@ -18,6 +18,23 @@ its own icon in the TV's app list and opens like any other app.
 - Tested only on the **LG 43UR7500 (webOS 23)**. Reports from other models are welcome
   ([compatibility list](docs/COMPAT.md)).
 
+## Safety: read this first
+
+- **Android apps run as root** on your TV, outside the webOS app sandbox. Only install APKs you trust, from their
+  official source.
+- The phone install page needs the **PIN** shown in the webOS ATL app. The manager's own service only answers the
+  manager app, so other devices on your network and web pages open in the TV's browser can't install or remove
+  apps.
+- webOS ATL does not modify any webOS system file. It only writes:
+  - `/media/developer/webosatl/` (programs, runtime, apps' data);
+  - one wrapper app per Android app (`org.webosatl.app.*`) in the developer apps folder;
+  - the boot hook `/var/lib/webosbrew/init.d/60-webosatl`;
+  - a luna-service2 role for its video helper, which is checked before it is installed.
+- **Turn it off without uninstalling:** `touch /media/developer/webosatl/disable` (SSH or Telnet from Homebrew
+  Channel), then reboot. If the TV ever crashes during start-up, Homebrew Channel's failsafe mode skips all boot
+  hooks.
+- Downloads always leave at least 150 MB free in `/media/developer`.
+
 ## Install
 
 1. In Homebrew Channel open **Settings**, and under extra repositories add:

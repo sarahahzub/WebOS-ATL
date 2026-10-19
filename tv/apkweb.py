@@ -3,11 +3,14 @@
 
   http://<tv-ip>:8790/   upload an .apk (or give a download link) -> wrapper app org.webosatl.app.<slug> is built
                          and installed; it shows up in the TV's app list. Lists/removes installed Android apps.
+                         Needs the PIN shown in the webOS ATL app (Android apps run as root: nobody else on the
+                         network, and no web page open in the TV's browser, may install them). The PIN is kept in a
+                         SameSite=Strict cookie; 10 wrong PINs lock the page for a minute.
                          "Type on TV": while an Android text field is focused on the TV (xdgshim writes
                          <app>/run/ti.state), text typed/pasted here goes into it (xdgshim FIFO <app>/run/ti.in).
 Stdlib only. Started at boot by init.sh (Homebrew Channel init.d hook 60-webosatl).
 """
-import html, io, json, os, re, shutil, struct, subprocess, sys, tarfile, threading, time, zipfile
+import hmac, html, io, json, os, re, secrets, shutil, struct, subprocess, sys, tarfile, threading, time, zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -17,6 +20,25 @@ ensure_dirs()
 PORT = int(os.environ.get("APKWEB_PORT", str(APKWEB_PORT)))
 LOCK = threading.Lock()
 LOG = open(f"{LOGS}/apkweb.log", "a", buffering=1)
+PIN_F = BASE + "/apkweb.pin"
+PUBLIC = {"/manifest.json", "/sw.js", "/icon.png", "/pin"}  # everything else needs the PIN cookie
+_fails = []  # times of wrong PIN attempts (rate limit)
+
+
+def pin():
+    """6-digit PIN of the phone page (created once, root-only file; the manager app shows it)"""
+    try:
+        p = open(PIN_F).read().strip()
+        if re.fullmatch(r"\d{6}", p):
+            return p
+    except OSError:
+        pass
+    p = "%06d" % secrets.randbelow(1000000)
+    fd = os.open(PIN_F + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(p + "\n")
+    os.replace(PIN_F + ".tmp", PIN_F)
+    return p
 # per-package apk.conf defaults written at every (re)install: Android package -> {apk.conf key: value}
 PKG_DEFAULTS = {
     # SmartTube (F-Droid / stable / beta builds): at SDK 21 Cronet's property shim calls dlopen("libc.so", RTLD_NOLOAD),
@@ -174,7 +196,7 @@ def install_url(url, title="", activity="", progress=None):
         with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
             total = int(r.headers.get("Content-Length") or 0)
             free = shutil.disk_usage(BASE).free
-            if total and total * 2 > free:
+            if total and total * 2 + (150 << 20) > free:
                 raise ValueError("Not enough space on TV (%d MB free)" % (free >> 20))
             done = 0
             while True:
@@ -323,6 +345,16 @@ def screenshot(w, h):
                 os.remove(p)
 
 
+PIN_PAGE = """<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>webOS ATL</title><style>body{font:16px system-ui,sans-serif;background:#14161c;color:#eee;margin:0;padding:20px;max-width:420px;margin:auto}
+input{width:100%;box-sizing:border-box;padding:12px;border-radius:8px;border:1px solid #333a46;background:#14161c;color:#eee;font-size:22px;letter-spacing:6px;text-align:center}
+button{background:#3ddc84;color:#0b3d1f;border:0;border-radius:10px;padding:12px;font-size:16px;font-weight:600;width:100%;margin-top:14px}
+p{color:#9aa3b2}</style></head><body><h1>webOS ATL</h1>
+<p>Enter the PIN shown on the TV in the webOS ATL app (Status page).</p>
+<input id=p inputmode=numeric maxlength=6 autocomplete=off><button id=b>Continue</button><p id=m></p>
+<script>b.onclick=()=>fetch('/pin',{method:'POST',body:JSON.stringify({pin:p.value.trim()})}).then(r=>r.text().then(t=>{if(r.ok)location.reload();else m.textContent=t}));
+p.onkeydown=e=>{if(e.key=='Enter')b.click()};p.focus();</script></body></html>"""
+
 PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta name=theme-color content="#14161c"><link rel=manifest href=/manifest.json><link rel=icon href=/icon.png>
@@ -399,6 +431,21 @@ SW = "self.addEventListener('fetch',e=>{});"
 
 
 class H(BaseHTTPRequestHandler):
+    def authed(self):
+        c = self.headers.get("Cookie", "")
+        m = re.search(r"(?:^|;\s*)atlpin=(\d{6})", c)
+        return bool(m) and hmac.compare_digest(m.group(1), pin())
+
+    def gate(self, path):
+        """True if the request may go on; otherwise the PIN page (for /) or 403 was sent"""
+        if path in PUBLIC or self.authed():
+            return True
+        if path == "/" and self.command == "GET":
+            self.send(200, PIN_PAGE, "text/html; charset=utf-8")
+        else:
+            self.send(403, "PIN needed: open http://<tv-ip>:%d/ and enter the PIN from the webOS ATL app" % PORT)
+        return False
+
     def send(self, code, body, ctype="text/plain; charset=utf-8", headers=()):
         b = body if isinstance(body, bytes) else body.encode()
         self.send_response(code)
@@ -412,6 +459,8 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
+        if not self.gate(path):
+            return
         if path == "/":
             rows = "".join('<div class=row><img src="/appicon?id=%s"><span>%s <a href="/compat?id=%s" style="font-size:12px;color:#9aa3b2">compat</a></span><button data-rm="%s" data-t="%s">Remove</button></div>'
                            % (i, html.escape(t), i, i, html.escape(t)) for i, t in installed()) or "<div class=row>None yet</div>"
@@ -462,13 +511,28 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         from urllib.parse import unquote
         path = self.path.split("?")[0]
+        if not self.gate(path):
+            return
         try:
+            if path == "/pin":
+                now = time.time()
+                _fails[:] = [t for t in _fails if now - t < 60]
+                if len(_fails) >= 10:
+                    return self.send(429, "Too many wrong PINs, wait a minute")
+                n = int(self.headers.get("Content-Length", "0"))
+                got = str(json.loads(self.rfile.read(min(n, 1024)) or b"{}").get("pin", "")) if n > 0 else ""
+                if not re.fullmatch(r"\d{6}", got) or not hmac.compare_digest(got, pin()):
+                    _fails.append(now)
+                    log("wrong PIN from", self.client_address[0])
+                    return self.send(403, "Wrong PIN")
+                return self.send(200, "ok", headers=[("Set-Cookie", "atlpin=%s; Max-Age=31536000; Path=/; "
+                                                                     "SameSite=Strict; HttpOnly" % got)])
             if path == "/upload":
                 n = int(self.headers.get("Content-Length", "0"))
                 if n <= 0 or n > 400 * 1024 * 1024:
                     return self.send(400, "APK missing or too big")
                 free = shutil.disk_usage(BASE).free
-                if n * 2 > free:
+                if n * 2 + (150 << 20) > free:  # keep 150 MB free
                     return self.send(507, "Not enough space on TV (%d MB free)" % (free >> 20))
                 title = unquote(self.headers.get("X-Title", "")).strip()[:60]  # empty: the app's own label
                 act = unquote(self.headers.get("X-Activity", "")).strip()
@@ -524,5 +588,6 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    pin()
     log("== apkweb on port", PORT)
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()

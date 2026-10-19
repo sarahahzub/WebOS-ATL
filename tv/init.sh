@@ -34,10 +34,13 @@ case "${1:-start}" in
 start)
 	[ -f "$BASE/disable" ] && [ -z "$2" ] && exit 0
 	echo "$(date '+%F %T') start" >> "$LOGS/init.log"
-	do_mount
-	run atld.py; run apkweb.py; run atlmgr.py
-	# Chromium add-on (installed by atlmgr): its root helper, busybox sh (browserd keeps one instance by its pid file)
-	[ -f "$BASE/chromium/browserd.sh" ] && { setsid sh "$BASE/chromium/browserd.sh" >> "$BASE/chromium/browserd.log" 2>&1 < /dev/null & } ;;
+	# in the background: the boot hook returns at once and never holds up the TV's start-up
+	(
+		do_mount
+		run atld.py; run apkweb.py; run atlmgr.py
+		# Chromium add-on (installed by atlmgr): its root helper, busybox sh (one instance, by its pid file)
+		[ -f "$BASE/chromium/browserd.sh" ] && { setsid sh "$BASE/chromium/browserd.sh" >> "$BASE/chromium/browserd.log" 2>&1 < /dev/null & }
+	) < /dev/null >> "$LOGS/init.log" 2>&1 & ;;
 stop)
 	stop_apps; stop_svc atld.py apkweb.py atlmgr.py
 	[ -f "$BASE/chromium/browserd.pid" ] && kill "$(cat "$BASE/chromium/browserd.pid")" 2>/dev/null ;;

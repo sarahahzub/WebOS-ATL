@@ -24,9 +24,9 @@
     "rootRequired": true,
     "ipkUrl": "https://github.com/sarahahzub/WebOS-ATL/releases/download/v0.1.0/org.webosatl.manager_0.1.0_all.ipk",
     "ipkHash": {
-     "sha256": "a03486b51ca4bb65cf978438271eb3ccc61be0c90007143eadfbd19051940c02"
+     "sha256": "3999c9d018f422e7faee4eacad65966e76b85c06ed9e5d6d0bf74dce03781c67"
     },
-    "ipkSize": 348752
+    "ipkSize": 352204
    },
    "pool": "main",
    "shortDescription": "Run Android apps on a rooted webOS TV (Android Translation Layer). Needs root and an aarch64 TV.",
