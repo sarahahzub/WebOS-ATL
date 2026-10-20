@@ -20,7 +20,7 @@ button.danger:focus{background:#e5484d;color:#fff}
 .card{background:#1b1f29;border-radius:18px;padding:22px 26px}
 .card .k{color:#8a92a6;font-size:22px}.card .v{font-size:32px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ok{color:#3ddc84}.bad{color:#ff7b7b}.warn{color:#ffc65c}
-.bar{height:14px;background:#262b38;border-radius:7px;overflow:hidden;margin:10px 0 6px}.bar i{display:block;height:100%;width:0;background:#3ddc84;transition:width .3s}
+.bar{height:20px;background:#262b38;border-radius:10px;overflow:hidden;margin:12px 0 8px}.bar i{display:block;height:100%;width:0;border-radius:10px;background:linear-gradient(90deg,#2fbf71,#3ddc84 60%,#7df0b0);transition:width .3s}
 #upmsg{color:#aab1c2;font-size:24px;min-height:34px}
 #applist{display:grid;grid-template-columns:repeat(5,1fr);gap:26px;overflow:hidden}
 .app{background:#1b1f29;border-radius:22px;padding:24px 14px 18px;text-align:center;transition:transform .12s,background .12s}
@@ -41,9 +41,27 @@ pre{background:#0b0d12;border-radius:14px;padding:22px;font:20px/1.4 monospace;w
 .hint{color:#6f778a;font-size:22px;margin-top:18px}
 input{font:inherit;font-size:26px;width:900px;padding:14px 20px;border-radius:14px;border:2px solid #262b38;background:#0b0d12;color:#e8eaf0;margin:0 14px 14px 0;outline:none}
 input:focus{border-color:#3ddc84}
-#setup{position:fixed;inset:0;background:#101218;display:none;padding:80px 120px}#setup.on{display:block}
-#setup h1{font-size:52px;margin:0 0 10px}#setup .lead{color:#aab1c2;font-size:28px;margin:0 0 34px;max-width:1500px}
-#setup ul{margin:0 0 30px;padding-left:34px;color:#c3c8d4;font-size:26px}#setup pre{height:380px;margin-top:20px}
+#setup{position:fixed;inset:0;background:#101218;display:none;padding:70px 120px}#setup.on{display:block}
+#setup h1{font-size:52px;margin:0 0 10px}#setup .lead{color:#aab1c2;font-size:28px;margin:0 0 30px;max-width:1600px}
+#setup ul{margin:0 0 30px;padding-left:34px;color:#c3c8d4;font-size:26px}
+#setup pre{height:150px;margin-top:26px;font-size:18px;color:#7d8597}
+[hidden]{display:none!important}
+.steps{display:flex;gap:16px;margin:6px 0 34px}
+.step{flex:1;background:#1b1f29;border-radius:16px;padding:18px 20px;font-size:24px;color:#6f778a;display:flex;align-items:center;gap:14px}
+.step i{width:34px;height:34px;border-radius:50%;border:3px solid #3a4152;flex:none;display:flex;align-items:center;justify-content:center;font-style:normal;font-size:20px}
+.step.now{color:#e8eaf0;background:#232837}.step.now i{border-color:#3ddc84;border-top-color:transparent;animation:spin 1s linear infinite}
+.step.done{color:#aab1c2}.step.done i{background:#3ddc84;border-color:#3ddc84;color:#08311a}.step.done i::after{content:"";width:8px;height:15px;border:solid #08311a;border-width:0 4px 4px 0;transform:translateY(-2px) rotate(45deg)}
+.step.fail{color:#ff8a8a}.step.fail i{border-color:#e5484d;background:#e5484d;color:#fff}.step.fail i::after{content:"!"}
+@keyframes spin{to{transform:rotate(360deg)}}
+.bigbar{height:30px;background:#1b1f29;border-radius:15px;overflow:hidden;position:relative;box-shadow:inset 0 0 0 2px #262b38}
+.bigbar i{position:absolute;left:0;top:0;bottom:0;width:0;border-radius:15px;background:linear-gradient(90deg,#2fbf71,#3ddc84 60%,#7df0b0);transition:width .6s ease}
+.bigbar.busy i{width:30%!important;animation:slide 1.4s ease-in-out infinite}
+.bigbar.failed i{animation:none;left:0;background:#e5484d}.bigbar.failed.busy i{width:100%!important}
+@keyframes slide{0%{left:-30%}100%{left:100%}}
+.prow{display:flex;justify-content:space-between;margin-top:14px;font-size:26px}.prow b{font-size:40px;color:#3ddc84;font-weight:600}
+#smsg{color:#aab1c2}
+#serr{background:#2a1a1e;border:2px solid #e5484d;border-radius:20px;padding:30px 36px;margin-top:10px}
+#serr h2{color:#ff8a8a;margin:0 0 10px}#serrmsg{font-size:27px;margin:0 0 24px;color:#f1d3d5;white-space:pre-wrap}
 .big{font-size:34px;color:#3ddc84}
 </style></head><body>
 <div id="side">
@@ -77,11 +95,19 @@ input:focus{border-color:#3ddc84}
 <div id="setup"><h1>webOS ATL</h1>
  <p class="lead">Runs Android apps on this TV. Setup copies the programs to /media/developer/webosatl, adds a start-up hook
  (Homebrew Channel) and then downloads the Android runtime (about 200 MB) in the background.</p>
- <ul><li>Needs a rooted TV with Homebrew Channel, a 64-bit (aarch64) CPU and 600 MB free space</li>
- <li>1.5 GB RAM or more recommended; tested on LG 43UR7500 (webOS 23)</li>
+ <ul id="sreq"><li>Needs a rooted TV with Homebrew Channel, a 64-bit (aarch64) CPU, 1.2 GB RAM and 600 MB free space</li>
+ <li>Tested on LG 43UR7500 (webOS 23)</li>
  <li>Remove it any time: Uninstall in this app, then remove the app in Homebrew Channel</li></ul>
- <button id="b-install">Install</button><button id="b-exit">Exit</button>
- <pre id="setuplog" tabindex="0"></pre></div>
+ <div id="sbtns"><button id="b-install">Install</button><button id="b-exit">Exit</button></div>
+ <div id="sprog" hidden>
+  <div class="steps"><div class="step" data-s="0"><i></i>Check TV</div><div class="step" data-s="1"><i></i>Copy programs</div>
+   <div class="step" data-s="2"><i></i>Start service</div><div class="step" data-s="3"><i></i>Download Android runtime</div>
+   <div class="step" data-s="4"><i></i>Ready</div></div>
+  <div class="bigbar busy" id="sbarw"><i id="sbar"></i></div>
+  <div class="prow"><span id="smsg">Starting…</span><b id="spct"></b></div>
+ </div>
+ <div id="serr" hidden><h2>Setup could not finish</h2><p id="serrmsg"></p><button id="b-retry">Try again</button><button id="b-exit2">Exit</button></div>
+ <pre id="setuplog"></pre></div>
 <div id="toast"></div>
 <script src="token.js"></script>
 <div id="confirm"><div><p id="cmsg"></p><button id="cyes" class="danger">Yes</button><button id="cno">Cancel</button></div></div>
@@ -101,7 +127,7 @@ function rootRun(cmd, onLine) {
   return new Promise((res, rej) => {
     let rc = null, buf = '';
     const line = t => { buf += t; const p = buf.split('\n'); buf = p.pop(); p.forEach(onLine); };
-    const b = hbc('spawn', {command: cmd}, j => {
+    const b = hbc('spawn', {command: cmd, subscribe: true}, j => {
       if (j.returnValue === false) { if (buf) onLine(buf); return rej(new Error(j.errorText || 'Homebrew Channel service not available (is the TV rooted?)')); }
       if (j.event == 'stdoutData') line(j.stdoutString || ''); else if (j.event == 'stderrData') line(j.stderrString || '');
       else if (j.event == 'close' || j.event == 'exit') { if (rc !== null) return; rc = j.closeCode ?? j.exitCode; if (buf) onLine(buf); buf = ''; res(rc); }
@@ -114,7 +140,8 @@ let page = 'status', detailId = null, apps = [], st = null, sets = null;
 /* token.js (written by the agent into this app's folder) authorizes the API; reloaded after setup / app updates */
 function loadToken() {
   return new Promise(res => { const e = document.createElement('script'); e.src = 'token.js?t=' + Date.now();
-    e.onload = e.onerror = () => { e.remove(); res(); }; document.head.appendChild(e); });
+    const done = () => { e.remove(); res(); }; e.onload = e.onerror = done; setTimeout(done, 3000);  // never hang the app
+    document.head.appendChild(e); });
 }
 const tok = () => encodeURIComponent(window.ATL_TOKEN || '');
 function api(p, o) {
@@ -163,7 +190,7 @@ function loadStatus() {
 function prog(p) {
   const pct = p.total ? 100 * p.done / p.total : (p.state == 'idle' ? 0 : 5);
   $('#upbar').style.width = pct + '%';
-  let m = p.msg || (st && st.runtime && st.runtime.ok ? 'Up to date' : '');
+  let m = (p.msg || (st && st.runtime && st.runtime.ok ? 'Up to date' : '')) + (p.total && p.state == 'downloading' ? ' · ' + Math.floor(pct) + '%' : '');
   $('#upmsg').textContent = m; $('#upmsg').className = p.state == 'error' ? 'bad' : '';
 }
 function ago(t) { const s = Date.now() / 1000 - t; return s < 90 ? 'just now' : s < 5400 ? Math.round(s / 60) + ' min ago' : Math.round(s / 3600) + ' h ago'; }
@@ -263,7 +290,7 @@ function loadLog(n, id) {
 /* ---------- D-pad navigation ---------- */
 function focusables() {
   if ($('#confirm').classList.contains('on')) return $$('#confirm button');
-  if ($('#setup').classList.contains('on')) return $$('#setup button, #setup pre');
+  if ($('#setup').classList.contains('on')) return $$('#setup button').filter(e => e.offsetParent !== null);
   return [...$$('.tab'), ...$$('.page.on button, .page.on .app, .page.on pre, .page.on input')].filter(e => e.offsetParent !== null);
 }
 function focusFirst() { const f = focusables().filter(e => !e.classList.contains('tab')); (f[0] || $('.tab.on')).focus(); }
@@ -301,22 +328,92 @@ document.addEventListener('keydown', e => {
 /* ---------- setup (first launch: the agent is not running yet) ---------- */
 function setupLog(l) { const v = $('#setuplog'); v.textContent += l + '\n'; v.scrollTop = v.scrollHeight; }
 function showSetup() { $('#setup').classList.add('on'); $('#b-install').focus(); }
-$('#b-exit').onclick = exitApp;
-$('#b-install').onclick = () => {
-  const b = $('#b-install'); b.disabled = true; $('#setuplog').textContent = '';
-  let ok = false;
-  rootRun('sh "' + PAYLOAD + '/install.sh" 2>&1', l => { setupLog(l); if (/^OK /.test(l)) ok = true; })
-    .then(rc => {
-      if (!ok) { b.disabled = false; setupLog('Setup failed (rc ' + rc + ').'); return; }
-      setupLog('Starting…'); let n = 0;
-      const t = setInterval(() => loadToken().then(loadStatus).then(() => { clearInterval(t); $('#setup').classList.remove('on'); show('status'); $('.tab.on').focus(); poll(); })
-        .catch(() => { if (++n > 30) { clearInterval(t); b.disabled = false; setupLog('The agent did not start; see /media/developer/webosatl/logs'); } }), 1000);
-    })
-    .catch(e => { b.disabled = false; setupLog('Error: ' + e.message); });
-};
+const S = {step: -1, ok: false, failed: false, watch: null, t0: 0, last: {done: -1, t: 0}};
+function setStep(n, fail) {
+  S.step = Math.max(S.step, n);
+  $$('.step').forEach(e => { const i = +e.dataset.s; e.className = 'step' + (i < S.step ? ' done' : i == S.step ? (fail ? ' fail' : (i == 4 ? ' done' : ' now')) : ''); });
+}
+function setBar(pct, msg) {
+  const w = $('#sbarw');
+  if (pct == null) { w.classList.add('busy'); $('#spct').textContent = ''; }
+  else { w.classList.remove('busy'); $('#sbar').style.width = Math.max(2, Math.min(100, pct)) + '%'; $('#spct').textContent = Math.floor(pct) + '%'; }
+  if (msg) $('#smsg').textContent = msg;
+}
+function fmtEta(s) { return s < 60 ? Math.ceil(s) + ' s' : Math.ceil(s / 60) + ' min'; }
+function friendly(m) {
+  const r = [[/name resolution|Name or service not known|getaddrinfo|Network is unreachable|No route to host|timed out|Connection (refused|reset)/i,
+              'The TV could not reach GitHub to download the Android runtime. Check the TV\'s internet connection, then press Try again.'],
+             [/not enough space|needs \d+ MB free/i, 'Not enough free space on the TV. '],
+             [/sha256|mismatch/i, 'The download was damaged on the way. Press Try again to download it again.'],
+             [/needs root|Homebrew Channel service not available/i, 'webOS ATL needs a rooted TV: in Homebrew Channel, Settings must show "Root status: ok".']];
+  for (const [re, t] of r) if (re.test(m)) return t + (t.endsWith(' ') ? m : '\n\nDetails: ' + m);
+  return m;
+}
+function setupFail(msg) {
+  if (S.failed) return; S.failed = true; clearInterval(S.watch); msg = friendly(msg);
+  $('#spct').style.color = '#ff8a8a';
+  setStep(Math.max(S.step, 0), true); $('#sbarw').classList.add('failed'); $('#smsg').textContent = '';
+  $('#serrmsg').textContent = msg; $('#serr').hidden = false; $('#sbtns').hidden = true;
+  $('#b-exit2').focus();
+}
+function setupDone() {
+  clearInterval(S.watch); setStep(4); setBar(100, 'webOS ATL is ready');
+  setTimeout(() => { $('#setup').classList.remove('on'); show('status'); $('.tab.on').focus(); }, 1800);
+}
+/* follow the agent: is it up, and how far is the runtime download? */
+function watchAgent() {
+  clearInterval(S.watch);
+  S.watch = setInterval(() => {
+    if (S.failed) return;
+    (window.ATL_TOKEN ? Promise.resolve() : loadToken()).then(() => api('/api/status')).then(s => {
+      st = s; if (S.step < 3) setStep(3);
+      const p = s.progress || {};
+      if (s.runtime && s.runtime.ok && s.runtime.mounted) return setupDone();
+      if (p.state == 'error') return setupFail(p.msg || 'The runtime download failed.');
+      if (p.state == 'downloading' && p.total) {
+        const pct = 100 * p.done / p.total, left = p.speed ? (p.total - p.done) / p.speed : 0;
+        setBar(pct, `Downloading Android runtime · ${(p.done / 1048576).toFixed(0)} / ${(p.total / 1048576).toFixed(0)} MB` +
+          (p.done >= p.total ? ' · checking…' : p.speed ? ` · ${(p.speed / 1048576).toFixed(1)} MB/s · about ${fmtEta(left)} left` : ''));
+        if (p.done != S.last.done) S.last = {done: p.done, t: Date.now()};
+        else if (Date.now() - S.last.t > 120000) setBar(pct, 'The download is not moving… still retrying (check the TV\'s internet connection)');
+      } else if (p.state == 'installing') setBar(100, 'Installing the runtime…');
+      else if (p.state == 'pending') setBar(100, 'Runtime downloaded; it is installed when no Android app is running');
+      else setBar(null, 'Preparing the download…');
+    }).catch(() => {
+      if (!window.ATL_TOKEN) return;
+      window.ATL_TOKEN = '';  // token.js may have been rewritten: reload it next time
+    });
+    if (!S.ok && S.step < 3 && Date.now() - S.t0 > 180000)
+      setupFail('Setup did not answer for 3 minutes.\nCheck that Homebrew Channel shows "Root status: ok", then try again.');
+  }, 1500);
+}
+function startSetup(retry) {
+  Object.assign(S, {step: -1, ok: false, failed: false, t0: Date.now(), last: {done: -1, t: Date.now()}});
+  $('#serr').hidden = true; $('#sbtns').hidden = true; $('#sreq').hidden = true; $('#sprog').hidden = false;
+  $('#setuplog').textContent = ''; $('#sbarw').classList.remove('failed'); $('#spct').style.color = ''; setStep(0); setBar(null, 'Checking the TV…');
+  watchAgent();
+  if (retry === 'agent') { post('/api/update'); return; }  // agent already installed: just retry the download
+  rootRun('sh "' + PAYLOAD + '/install.sh" 2>&1', l => {
+    setupLog(l);
+    if (/^TV: /.test(l)) setStep(1), setBar(null, 'Copying programs…');
+    else if (/^copying programs/.test(l)) setStep(1), setBar(null, 'Copying programs…');
+    else if (/^adding boot hook/.test(l)) setStep(1), setBar(null, 'Adding the start-up hook…');
+    else if (/^starting services/.test(l)) setStep(2), setBar(null, 'Starting the service…');
+    else if (/^OK /.test(l)) { S.ok = true; setStep(3); setBar(null, 'Preparing the download…'); }
+    else if (/^ERROR /.test(l)) setupFail(l.slice(6));
+  }).then(rc => { if (!S.ok && !S.failed && rc) setupFail('Setup stopped (exit code ' + rc + '). Details are below.'); })
+    .catch(e => setupFail(e.message));
+}
+$('#b-exit').onclick = $('#b-exit2').onclick = exitApp;
+$('#b-install').onclick = () => startSetup();
+$('#b-retry').onclick = () => startSetup(st ? 'agent' : undefined);
 function boot(tries) {
   (window.ATL_TOKEN ? Promise.resolve() : loadToken()).then(loadStatus).then(s => {
     $('.tab.on').focus();
+    if (!(s.runtime && s.runtime.ok)) {  // installed, runtime still downloading (or failed): show its progress
+      showSetup(); Object.assign(S, {step: 3, ok: true, failed: false, t0: Date.now(), last: {done: -1, t: Date.now()}});
+      $('#sbtns').hidden = true; $('#sreq').hidden = true; $('#sprog').hidden = false; setStep(3); watchAgent();
+    }
     if (s.payload_version && s.payload_version != s.version) post('/api/update');  // the app was just updated
   }).catch(e => {
     // agent up but token.js not (re)written yet (just updated): wait for it; agent not running: setup

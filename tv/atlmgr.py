@@ -30,7 +30,7 @@ ensure_dirs()
 RUNTIME_STATE = BASE + "/runtime.json"   # {"sha256", "version"} of the installed runtime image
 LOG_F = LOGS + "/atlmgr.log"
 REPO = "sarahahzub/WebOS-ATL"
-LATEST_URL = "https://raw.githubusercontent.com/%s/main/repo/manifest.json" % REPO  # newest manager app (Homebrew)
+LATEST_URL = "https://raw.githubusercontent.com/%s/main/repo/manifests/org.webosatl.manager.json" % REPO  # newest manager app (Homebrew)
 DEFAULTS = {"env": {"ATL_DENSITY": "320", "ATL_IS_TELEVISION": "1"}, "dex2oat": "verify"}
 TOKEN_F = BASE + "/mgr.token"
 KEEP_FREE_MB = 150  # never fill /media/developer: downloads leave at least this much free
