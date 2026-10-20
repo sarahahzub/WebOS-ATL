@@ -1,0 +1,47 @@
+# Attach release files that were built elsewhere (the runtime and Chromium images are built on an aarch64 server).
+# Run it by hand: Actions -> "Attach release assets" -> Run workflow.
+#   tag:     release tag (the release must exist, draft is fine)
+#   base:    https URL of a folder with the files and their SHA256SUMS
+#   sums:    the expected SHA256SUMS text (pasted): every file is checked against it before anything is uploaded
+name: Attach release assets
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag
+        required: true
+      base:
+        description: https folder URL with the files
+        required: true
+      sums:
+        description: Expected SHA256SUMS content
+        required: true
+permissions:
+  contents: write
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and verify
+        env:
+          BASE: ${{ inputs.base }}
+          SUMS: ${{ inputs.sums }}
+        run: |
+          set -eu
+          case "$BASE" in https://*) ;; *) echo "base must be https"; exit 1 ;; esac
+          mkdir dl && cd dl
+          printf '%s\n' "$SUMS" | tr -s ' ' | sed '/^$/d' > SHA256SUMS
+          awk '{print $2}' SHA256SUMS | while read -r f; do
+            case "$f" in */*|..*|"") echo "bad file name: $f"; exit 1 ;; esac
+            curl -fsSL --retry 5 -o "$f" "$BASE/$f"
+          done
+          sha256sum -c SHA256SUMS
+          ls -l
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          cd dl
+          gh release upload "$TAG" --clobber -R "$GITHUB_REPOSITORY" $(awk '{print $2}' SHA256SUMS) SHA256SUMS
