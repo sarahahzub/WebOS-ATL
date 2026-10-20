@@ -16,7 +16,8 @@ free=$(df -Pm /media/developer | awk 'NR==2{print $4}')
 if [ ! -f "$RUNTIME_IMG" ] && [ "${free:-0}" -lt 600 ]; then fail "needs 600 MB free in /media/developer, only ${free} MB"; fi
 mem=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
 echo "TV: $(uname -m), ${mem} MB RAM, ${free} MB free"
-[ "${mem:-0}" -lt 1400 ] && echo "WARNING: less than 1.5 GB RAM; big apps may be closed by the system"
+# 1.2 GB TVs (the 43UR7500 reports 1222 MB) are the minimum; the kernel reserve varies a little between models
+[ "${mem:-0}" -ge 1150 ] || fail "needs about 1.2 GB RAM, this TV has ${mem} MB"
 [ -d /media/developer/atl ] && echo "NOTE: an older ATL install is in /media/developer/atl (it uses the same ports; remove it)"
 echo "copying programs"
 for f in "$P"/*; do

@@ -14,7 +14,7 @@ Global defaults (webOS ATL manager -> Settings): settings.json {"env": {NAME: va
 apk.conf ENV_<NAME> still wins per app.
 Log: /media/developer/webosatl/logs/atld.log
 
-Memory policy (settings.json "memory": {...}, see MEM_DEFAULTS; a 1.5 GB TV has room for one big Android app):
+Memory policy (settings.json "memory": {...}, see MEM_DEFAULTS; a 1.2 GB TV has room for one big Android app):
 - single_app: starting an Android app first stops every other running one (and closes its wrapper through SAM) and
   closes the background apps in close_apps (browsers, YouTube, Netflix, ...). When the browser or an Android app
   comes to the front by other means, the other Android apps are stopped too.

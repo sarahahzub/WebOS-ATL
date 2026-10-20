@@ -14,7 +14,7 @@ its own icon in the TV's app list and opens like any other app.
 - A 64-bit CPU: `uname -m` must say `aarch64`.
 - **600 MB** free in `/media/developer` (the runtime takes about 200 MB, apps and their data take the rest), and
   160 MB more for the optional Chromium add-on.
-- **1.5 GB RAM** or more recommended. One big Android app needs 300–700 MB.
+- **1.2 GB RAM** or more. One big Android app needs 300–700 MB, so only one runs at a time by default.
 - Tested only on the **LG 43UR7500 (webOS 23)**. Reports from other models are welcome
   ([compatibility list](docs/COMPAT.md)).
 

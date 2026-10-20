@@ -4,7 +4,7 @@
 
 | Model | webOS | RAM | Result |
 |---|---|---|---|
-| LG 43UR7500 | webOS 23 (8.x) | 1.5 GB | works (the development TV) |
+| LG 43UR7500 | webOS 23 (8.x) | 1.2 GB | works (the development TV) |
 
 Send a report (issue template "TV report") with `uname -m`, the webOS version, your RAM and what happened.
 

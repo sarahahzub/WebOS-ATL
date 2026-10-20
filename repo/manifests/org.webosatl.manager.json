@@ -1,15 +1,15 @@
 {
  "id": "org.webosatl.manager",
- "version": "0.1.0",
+ "version": "0.1.1",
  "type": "web",
  "title": "webOS ATL",
  "appDescription": "Run Android apps on a rooted webOS TV (Android Translation Layer). Needs root and an aarch64 TV.",
  "iconUri": "https://raw.githubusercontent.com/sarahahzub/WebOS-ATL/main/manager/icon-512.png",
  "sourceUrl": "https://github.com/sarahahzub/WebOS-ATL",
  "rootRequired": true,
- "ipkUrl": "https://github.com/sarahahzub/WebOS-ATL/releases/download/v0.1.0/org.webosatl.manager_0.1.0_all.ipk",
+ "ipkUrl": "https://github.com/sarahahzub/WebOS-ATL/releases/download/v0.1.1/org.webosatl.manager_0.1.1_all.ipk",
  "ipkHash": {
-  "sha256": "3999c9d018f422e7faee4eacad65966e76b85c06ed9e5d6d0bf74dce03781c67"
+  "sha256": "92a6455d54b5ae9710f87b1992d1a03b4c021be1050a64f685db5ab61d8882c5"
  },
- "ipkSize": 352204
+ "ipkSize": 354884
 }
