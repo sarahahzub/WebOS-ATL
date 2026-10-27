@@ -19,8 +19,16 @@
  *     ATLVDEC_FULL_RECT="x y w h" use this rect when ATL asks for the full plane 0,0 1920x1080 (on the exported
  *                        ATL window a full-size SetArea after a smaller one is not applied by the compositor)
  *
+ *     ATLVDEC_BACKEND=auto|starfish|ndl  decoder for ATL clients that can feed ahead (proto.h protocol 2): auto
+ *                        (default) = Starfish (sf.c: LG's StarfishMediaAPIs, frames presented by pts at the declared
+ *                        frame rate on the exported ATL window) when libplayerAPIs is there, the ATL window is
+ *                        exported (ATLVDEC_WINID_FILE) and the TV reports the codec, else NDL; ndl = always NDL
+ *                        (release-time feeding, the behaviour before protocol 2); starfish = fail instead of NDL.
+ *                        Clients of protocol 1 (ATL runtime 0.1.0) always get NDL.
+ *
  * Serves one stream at a time (a new connection replaces the current one). Protocol: proto.h.
- * Built with -DNDL_STUB it links ndl_stub.c (logs the calls) instead of dlopen-ing the TV library. */
+ * Built with -DNDL_STUB it links ndl_stub.c (logs the calls) instead of dlopen-ing the TV library, and with
+ * -DSF_STUB sf_stub.c instead of libplayerAPIs. */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
@@ -37,6 +45,7 @@
 #include <unistd.h>
 
 #include "proto.h"
+#include "sf.h"
 
 /* NDL_directmedia v2 types (layout from ss4s / webos-userland NDL_directmedia_types.h) */
 typedef struct {
@@ -79,12 +88,14 @@ static int (*sdl_PollEvent)(void *);
 static int sdl_on;
 
 static volatile sig_atomic_t quit;
+static int sf_mode; /* the current stream goes to Starfish (sf.c), ahead mode */
 static int ndl_inited, loaded;
 static ndl_info_t info;
 static struct timespec load_time;
 static unsigned long nfeed, nfail;
 
-static void logf_(const char *fmt, ...)
+void avd_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void avd_log(const char *fmt, ...)
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -95,7 +106,7 @@ static void logf_(const char *fmt, ...)
 	va_end(ap);
 	fputc('\n', stderr);
 }
-#define LOG(...) logf_(__VA_ARGS__)
+#define LOG(...) avd_log(__VA_ARGS__)
 
 static const char *err(void)
 {
@@ -460,6 +471,20 @@ static double linger_s(void)
 }
 static void unload_later(const char *why)
 {
+	if (sf_mode) {
+		sf_flush(); /* the picture holds; a reuse continues the timeline */
+		if (linger_s() <= 0) {
+			sf_unload();
+			sf_mode = 0;
+			return;
+		}
+		if (!linger_on) {
+			linger_on = 1;
+			clock_gettime(CLOCK_MONOTONIC, &linger_t0);
+			LOG("%s: Starfish stays loaded for %.1f s", why, linger_s());
+		}
+		return;
+	}
 	if (!loaded || linger_s() <= 0) {
 		unload();
 		memset(&info, 0, sizeof(info));
@@ -475,6 +500,12 @@ static void linger_tick(void)
 {
 	if (linger_on && since(&linger_t0) >= linger_s()) {
 		LOG("linger over");
+		if (sf_mode) {
+			linger_on = 0;
+			sf_unload();
+			sf_mode = 0;
+			return;
+		}
 		unload();
 		memset(&info, 0, sizeof(info));
 	}
@@ -531,9 +562,63 @@ static void reply(int fd, int status, const char *msg)
 	write_full(fd, &m, sizeof(m));
 }
 
+static const char *backend_env(void)
+{
+	const char *b = getenv("ATLVDEC_BACKEND");
+	return b && *b ? b : "auto";
+}
+
+/* Starfish for this OPEN? (protocol 2 client that feeds ahead, backend not forced to NDL, ATL window exported,
+ * libplayerAPIs usable, codec reported by the TV); `why` says why not */
+static int want_starfish(const struct avd_open *o, char *why, size_t n)
+{
+	if (!(o->flags & AVD_OPEN_AHEAD))
+		return snprintf(why, n, "client feeds at release time (protocol 1)"), 0;
+	if (!strcmp(backend_env(), "ndl"))
+		return snprintf(why, n, "ATLVDEC_BACKEND=ndl"), 0;
+	if (!atlwin_file())
+		return snprintf(why, n, "no exported ATL window (VIDEO_EXPORT off)"), 0;
+	if (sf_available(why, n))
+		return 0;
+	if (!sf_codec_ok(o->codec))
+		return snprintf(why, n, "codec %u not reported by this TV's decoder", o->codec), 0;
+	return 1;
+}
+
 static void do_open(int fd, const struct avd_open *o)
 {
 	char msg[160] = "";
+	char why[160] = "";
+	if (want_starfish(o, why, sizeof(why))) {
+		if (sf_same_stream(o)) {
+			linger_on = 0;
+			sf_mode = 1;
+			sf_reuse();
+			reply(fd, 0, "ok starfish ahead (reused)");
+			return;
+		}
+		unload(); /* an NDL stream that lingers */
+		const char *id = atlwin_id(5000);
+		if (id && !sf_open(o, id, msg, sizeof(msg))) {
+			linger_on = 0;
+			sf_mode = 1;
+			LOG("OPEN -> Starfish (%s)", msg);
+			reply(fd, 0, msg);
+			return;
+		}
+		if (!id)
+			snprintf(msg, sizeof(msg), "no ATL window id");
+		LOG("Starfish failed: %s%s", msg, strcmp(backend_env(), "starfish") ? "; using NDL" : "");
+		if (!strcmp(backend_env(), "starfish")) {
+			reply(fd, -4, msg);
+			return;
+		}
+	} else if (o->flags & AVD_OPEN_AHEAD) {
+		LOG("NDL for this stream: %s", why);
+	}
+	sf_mode = 0;
+	sf_unload();
+	msg[0] = 0;
 	if (!p_Play && ndl_resolve(msg, sizeof(msg))) {
 		LOG("NDL unavailable: %s", msg);
 		reply(fd, -1, msg);
@@ -550,7 +635,8 @@ static void do_open(int fd, const struct avd_open *o)
 		}
 		ndl_inited = 1;
 	}
-	int type = o->codec == AVD_CODEC_HEVC ? 2 : 1, w = o->width ? (int)o->width : 1920, h = o->height ? (int)o->height : 1080;
+	int type = o->codec >= AVD_CODEC_H264 && o->codec <= AVD_CODEC_AV1 ? (int)o->codec : 1, w = o->width ? (int)o->width : 1920,
+	    h = o->height ? (int)o->height : 1080;
 	if (loaded && info.video.type == type && info.video.width == w && info.video.height == h) {
 		linger_on = 0;
 		LOG("OPEN reuses the loaded decoder (fed %lu)", nfeed);
@@ -559,7 +645,7 @@ static void do_open(int fd, const struct avd_open *o)
 	}
 	unload();
 	memset(&info, 0, sizeof(info));
-	info.video.type = o->codec == AVD_CODEC_HEVC ? 2 : 1;
+	info.video.type = type;
 	info.video.width = o->width ? (int)o->width : 1920;
 	info.video.height = o->height ? (int)o->height : 1080;
 	nfeed = nfail = 0;
@@ -786,6 +872,57 @@ static void feed_msg(void *buf, uint32_t len)
 	pq_run();
 }
 
+/* AUs Starfish refused with BufferFull, in decode order; retried from the main loop */
+static struct pend *sq;
+static int sq_n, sq_cap;
+static unsigned long sq_drops;
+static void sq_drop(void)
+{
+	for (int i = 0; i < sq_n; i++)
+		free(sq[i].buf);
+	sq_n = 0;
+}
+static void sq_run(void)
+{
+	int i = 0;
+	while (i < sq_n) {
+		int rc = sf_feed(sq[i].buf, sq[i].len, sq[i].due /* pts */);
+		if (rc == 1)
+			break;
+		free(sq[i].buf);
+		i++;
+	}
+	if (i) {
+		sq_n -= i;
+		memmove(sq, sq + i, sq_n * sizeof(*sq));
+	}
+}
+static void sf_feed_msg(void *buf, uint32_t len, int64_t pts)
+{
+	if (!sq_n && sf_feed(buf, len, pts) != 1)
+		return;
+	if (sq_n >= 600) { /* ~8 MB in the pipeline plus this: the decoder stopped taking data */
+		if (sq_drops++ % 100 == 0)
+			LOG("Starfish takes no data: dropping AUs (%lu)", sq_drops);
+		return;
+	}
+	if (sq_n == sq_cap) {
+		sq_cap = sq_cap ? sq_cap * 2 : 32;
+		sq = realloc(sq, sq_cap * sizeof(*sq));
+	}
+	void *c = malloc(len ? len : 1);
+	memcpy(c, buf, len);
+	sq[sq_n++] = (struct pend){c, len, pts, 0};
+}
+
+static void reply_hello(int fd)
+{
+	char why[160], msg[60];
+	int sf = strcmp(backend_env(), "ndl") && atlwin_file() && !sf_available(why, sizeof(why));
+	snprintf(msg, sizeof(msg), "atlvdec 2 %s %s", sf ? "starfish" : "ndl", sf ? sf_codecs() : "h264 hevc");
+	reply(fd, 0, msg);
+}
+
 static void on_term(int s)
 {
 	(void)s;
@@ -842,8 +979,15 @@ int main(int argc, char **argv)
 		int pw = pq_run();
 		if (pw >= 0 && (to < 0 || pw < to))
 			to = pw;
+		int sw = sf_mode ? (sq_n ? 10 : sf_wait_ms()) : -1;
+		if (sw >= 0 && (to < 0 || sw < to))
+			to = sw;
 		int n = poll(p, cl >= 0 ? 2 : 1, to);
 		pq_run();
+		if (sf_mode) {
+			sq_run();
+			sf_tick();
+		}
 		linger_tick();
 		area_tick();
 		area_file_tick();
@@ -858,6 +1002,7 @@ int main(int argc, char **argv)
 			if (c >= 0) {
 				if (cl >= 0) {
 					pq_drop();
+					sq_drop();
 					next_due = 0;
 					unload_later("new client replaces the current stream");
 					close(cl);
@@ -873,6 +1018,7 @@ int main(int argc, char **argv)
 		if (read_full(cl, &h, sizeof(h)) || h.len > AVD_MAX_PAYLOAD) {
 			LOG("client disconnected");
 			pq_drop();
+			sq_drop();
 			pace_log();
 			st.last_ns = 0;
 			next_due = 0;
@@ -887,6 +1033,9 @@ int main(int argc, char **argv)
 		}
 		if (h.len && read_full(cl, buf, h.len)) {
 			LOG("client disconnected (short message)");
+			sq_drop();
+			sf_unload();
+			sf_mode = 0;
 			unload();
 			close(cl);
 			cl = -1;
@@ -895,10 +1044,16 @@ int main(int argc, char **argv)
 		memset(buf + h.len, 0, 64);
 		switch (h.type) {
 			case AVD_OPEN: {
-				struct avd_open o = {0};
+				struct avd_open o;
+				memset(&o, 0, sizeof(o));
 				memcpy(&o, buf, h.len < sizeof(o) ? h.len : sizeof(o));
-				LOG("OPEN codec=%s %ux%u", o.codec == AVD_CODEC_HEVC ? "hevc" : "h264", o.width, o.height);
+				static const char *cn[] = {"?", "h264", "hevc", "vp9", "av1"};
+				LOG("OPEN codec=%s %ux%u%s fps %.3f transfer %u primaries %u matrix %u%s%s (protocol %d)",
+				    cn[o.codec <= AVD_CODEC_AV1 ? o.codec : 0], o.width, o.height, o.flags & AVD_OPEN_AHEAD ? " ahead" : "",
+				    o.fps_milli / 1000.0, o.transfer, o.primaries, o.matrix, o.full_range ? " full-range" : "",
+				    o.has_mastering ? " +mastering" : "", h.len > AVD_OPEN_V1_LEN ? 2 : 1);
 				pq_drop();
+				sq_drop();
 				pace_log();
 				st.last_ns = 0;
 				next_due = 0;
@@ -906,12 +1061,21 @@ int main(int argc, char **argv)
 				break;
 			}
 			case AVD_FEED:
-				feed_msg(buf, h.len);
+				if (sf_mode)
+					sf_feed_msg(buf, h.len, h.pts_us);
+				else
+					feed_msg(buf, h.len);
+				break;
+			case AVD_HELLO:
+				reply_hello(cl);
 				break;
 			case AVD_DUE: {
 				int64_t d = 0;
 				memcpy(&d, buf, h.len < sizeof(d) ? h.len : sizeof(d));
-				next_due = smooth_due(d);
+				if (sf_mode)
+					sf_due(d, h.pts_us);
+				else
+					next_due = smooth_due(d);
 				break;
 			}
 			case AVD_AREA: {
@@ -922,12 +1086,20 @@ int main(int argc, char **argv)
 					LOG("AREA %d,%d %dx%d from ATL ignored (ATLVDEC_AREA=none)", r.x, r.y, r.w, r.h);
 				else if (r.w > 0 && r.h > 0) {
 					area = r;
-					area_changed();
+					if (sf_mode)
+						sf_area(r.x, r.y, r.w, r.h);
+					else
+						area_changed();
 				}
 				break;
 			}
 			case AVD_FLUSH:
 				LOG("FLUSH");
+				if (sf_mode) {
+					sq_drop();
+					sf_flush();
+					break;
+				}
 				pq_drop();
 				next_due = 0;
 				smooth_reset();
@@ -936,6 +1108,12 @@ int main(int argc, char **argv)
 				break;
 			case AVD_CLOSE:
 				LOG("CLOSE");
+				if (sf_mode) {
+					sq_run();
+					sq_drop();
+					unload_later("CLOSE");
+					break;
+				}
 				for (int i = 0; i < pq_n; i++) /* end of stream: the last AUs at once */
 					do_feed(pq[i].buf, pq[i].len, pq[i].due, pq[i].recv);
 				pq_drop();
@@ -948,6 +1126,7 @@ int main(int argc, char **argv)
 				LOG("unknown message %u", h.type);
 		}
 	}
+	sf_unload();
 	unload();
 	if (ndl_inited) {
 		int rc = p_Quit();

@@ -29,10 +29,22 @@
    backtraces). The environment comes from `apk.conf` `ENV_*` keys and the settings.
 4. When the app is closed, `run.sh` gets SIGTERM and writes `stop`. `atld` then ends the app's process session.
 
-Hardware video decoding (`ATL_HWDEC=1`): `run.sh` also starts `atlvdec`, a 32-bit helper that links LG's
-`libNDL_directmedia`. ATL sends compressed frames to it over a socket. `xdgshim` exports the app window as a webOS
-video element, so the hardware video plane shows through it. `ls2-role.sh` gives `atlvdec` the luna-service2 role
-that NDL needs.
+Hardware video decoding (`ATL_HWDEC=1`): `run.sh` also starts `atlvdec`, a 32-bit helper. ATL sends compressed
+frames to it over a socket (`native/atlvdec/proto.h`). `xdgshim` exports the app window as a webOS video element, so
+the hardware video plane shows through it. `ls2-role.sh` gives `atlvdec` the luna-service2 role the media
+pipeline needs. The helper has two backends:
+
+- **Starfish** (`sf.c`, LG's `libplayerAPIs`, the buffer-feed pipeline LG's own apps and CSWeb use), for ATL runtimes
+  that speak protocol 2. ATL sends every frame as soon as the app queues it, with its pts and the stream's frame
+  rate and colour/HDR metadata. The pipeline presents frames by pts at the declared frame rate. When the app
+  releases a frame, ATL only sends its due time, and `sf.c` keeps the pipeline's clock on those times. The app's
+  clock (its audio) stays the master: Play is timed to the first due time, small offsets are removed by shifting
+  the pts of frames not fed yet, the clock is paused when the app stops releasing, and seeks splice the timeline.
+- **NDL** (`libNDL_directmedia`, low-delay mode), for runtime 0.1.0 and as the fallback. ATL sends a frame when the
+  app releases it, and the helper feeds it at its due time on a smoothed grid.
+
+`ATLVDEC_BACKEND=ndl` (apk.conf `VDEC_ENV`) forces NDL. Audio is unchanged in both: it plays through ATL and
+PulseAudio.
 
 ### Memory
 

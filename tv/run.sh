@@ -20,7 +20,8 @@ SC=$(sed -n 's/^SOFTCURSOR=//p' "$D/apk.conf" 2>/dev/null | head -1)
 SE=$(sed -n 's/^SHIM_ENV=//p' "$D/apk.conf" 2>/dev/null | head -1)
 mv -f "$D/run/shim.log" "$D/run/shim.log.prev" 2>/dev/null
 # hardware video decode (apk.conf ENV_ATL_HWDEC=1 or settings.json env ATL_HWDEC=1): the 32-bit atlvdec helper
-# (libNDL_directmedia) runs in this app's process tree; atld points ATL at its socket (ATL_HWDEC_SOCK)
+# (LG's Starfish media pipeline for protocol-2 runtimes, else libNDL_directmedia) runs in this app's process tree;
+# atld points ATL at its socket (ATL_HWDEC_SOCK). VDEC_ENV="ATLVDEC_BACKEND=ndl" in apk.conf forces NDL.
 HW=$(sed -n 's/^ENV_ATL_HWDEC=//p' "$D/apk.conf" 2>/dev/null | head -1)
 [ -z "$HW" ] && grep -q '"ATL_HWDEC": *"1"' /media/developer/webosatl/settings.json 2>/dev/null && HW=1
 VD=/media/developer/webosatl/bin/atlvdec  # fixed path: its luna-service2 role (ls2-role.sh) names this exe

@@ -2,7 +2,8 @@
 # build.sh [out-dir]: build the TV-side native helpers (run on an aarch64 Linux host with docker, e.g. an Oracle
 # Ampere VM). Output (default native/out):
 #   xdgshim    32-bit ARM, static        Wayland shim between the Android app and webOS LSM (window, remote keys, pointer)
-#   atlvdec    32-bit ARM soft-float     hardware video decode helper (LG libNDL_directmedia), dynamic glibc <= 2.34
+#   atlvdec    32-bit ARM soft-float     hardware video decode helper (LG StarfishMediaAPIs / libNDL_directmedia),
+#                                        dynamic glibc <= 2.34
 #   atlfix.so  aarch64, LD_PRELOAD       libpulse protocol fix, line-buffered stdout, crash backtraces
 #   low4g.so   aarch64, LD_PRELOAD       ART low-4GB allocator fix (startup hang on 39-bit VA kernels)
 set -e
@@ -15,7 +16,7 @@ apt-get update -qq >/dev/null 2>&1
 apt-get install -y -qq gcc-arm-linux-gnueabihf libc6-dev-armhf-cross gcc-arm-linux-gnueabi libc6-dev-armel-cross >/dev/null 2>&1
 arm-linux-gnueabihf-gcc -O2 -Wall -static -o /o/xdgshim /s/xdgshim/xdgshim.c -lm
 arm-linux-gnueabihf-strip /o/xdgshim
-arm-linux-gnueabi-gcc -O2 -Wall -static-libgcc -rdynamic -o /o/atlvdec /s/atlvdec/atlvdec.c -ldl
+arm-linux-gnueabi-gcc -O2 -Wall -static-libgcc -rdynamic -o /o/atlvdec /s/atlvdec/atlvdec.c /s/atlvdec/sf.c -ldl -lpthread
 arm-linux-gnueabi-strip /o/atlvdec
 echo "glibc symbols needed by atlvdec:"; arm-linux-gnueabi-objdump -T /o/atlvdec | grep -o "GLIBC_[0-9.]*" | sort -uV | tr "\n" " "; echo
 chown $(stat -c %u:%g /o) /o/*'

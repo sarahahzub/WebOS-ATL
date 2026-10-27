@@ -1,0 +1,380 @@
+From 3e272b6cf38f855a01e0ebc84c7215361f5ed2da Mon Sep 17 00:00:00 2001
+From: Kiro Agent <kiro-agent@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 13:37:56 +0530
+Subject: [PATCH] tv: hardware decode protocol 2 (ATL_HWDEC): frame rate,
+ colour and HDR metadata in OPEN; with a Starfish helper AUs go out at queue
+ time and releaseOutputBuffer only sends the due time and pts; VP9 to the
+ helper when its decoder takes it
+
+---
+ .../media/android_media_MediaCodec.c          | 180 ++++++++++++++----
+ src/api-impl/android/media/MediaCodec.java    |  13 ++
+ src/api-impl/android/media/MediaFormat.java   |   4 +
+ 3 files changed, 164 insertions(+), 33 deletions(-)
+
+diff --git a/src/api-impl-jni/media/android_media_MediaCodec.c b/src/api-impl-jni/media/android_media_MediaCodec.c
+index b5a3f12f..a9835c15 100644
+--- a/src/api-impl-jni/media/android_media_MediaCodec.c
++++ b/src/api-impl-jni/media/android_media_MediaCodec.c
+@@ -51,6 +51,9 @@ struct ATL_codec_context {
+ 	};
+ 	struct hwdec *hw; /* ATL_HWDEC: video goes to the atlvdec helper */
+ 	int hw_width, hw_height;
++	int hw_fps_milli, hw_standard, hw_transfer, hw_range; /* MediaFormat, for the helper's OPEN */
++	uint8_t hw_hdr[25];
++	int hw_hdr_len;
+ };
+ 
+ /* ---------------- ATL_HWDEC: hardware decode through the 32-bit atlvdec helper (gpu/atlvdec/proto.h) ---------------- */
+@@ -60,7 +63,18 @@ struct avd_hdr {
+ 	uint32_t len;
+ 	int64_t pts_us;
+ };
+-enum { AVD_OPEN = 1, AVD_FEED = 2, AVD_AREA = 3, AVD_FLUSH = 4, AVD_CLOSE = 5, AVD_DUE = 6, AVD_RESULT = 16 };
++enum { AVD_OPEN = 1, AVD_FEED = 2, AVD_AREA = 3, AVD_FLUSH = 4, AVD_CLOSE = 5, AVD_DUE = 6, AVD_HELLO = 8, AVD_RESULT = 16 };
++
++/* protocol 2 OPEN (native/atlvdec/proto.h struct avd_open, 56 bytes); a protocol-1 helper reads the first 12 */
++struct avd_open2 {
++	uint32_t codec, width, height, flags, fps_milli;
++	uint8_t transfer, primaries, matrix, full_range, has_mastering, has_light_level, pad[2];
++	uint16_t primaries_xy[3][2], white_xy[2];
++	uint32_t max_luminance, min_luminance;
++	uint16_t max_cll, max_fall;
++};
++_Static_assert(sizeof(struct avd_open2) == 56, "avd_open layout");
++
+ 
+ #define HW_WINDOW 4
+ #define HW_MAX_AUS 24
+@@ -93,6 +107,8 @@ struct hwdec {
+ 	uint8_t *prefix; /* non-VCL input (config) waiting for the next picture */
+ 	size_t prefix_len;
+ 	gboolean hevc;
++	gboolean vp9;   /* frames as they are: no Annex-B parsing, no csd */
++	gboolean ahead; /* protocol-2 helper: AUs at queue time, AVD_DUE with the frame's pts at release */
+ 	SurfaceViewWidget *widget;
+ 	int area[4];
+ 	gint64 last_area;
+@@ -224,6 +240,60 @@ static void hwdec_clear(struct hwdec *hw)
+ 	hw->need_csd = hw->csd_len > 0;
+ }
+ 
++/* the helper's AVD_RESULT within timeout_ms: status (msg filled), or -1000 without a reply */
++static int hw_result(int fd, int timeout_ms, char *msg, size_t n)
++{
++	struct {
++		struct avd_hdr h;
++		int32_t status;
++		char msg[60];
++	} r = {0};
++	size_t got = 0;
++	gint64 end = g_get_monotonic_time() + timeout_ms * 1000LL;
++	while (got < sizeof(r)) {
++		int left = (int)((end - g_get_monotonic_time()) / 1000);
++		struct pollfd p = {fd, POLLIN, 0};
++		if (left <= 0 || poll(&p, 1, left) <= 0)
++			break;
++		ssize_t k = read(fd, (char *)&r + got, sizeof(r) - got);
++		if (k <= 0)
++			break;
++		got += k;
++	}
++	r.msg[sizeof(r.msg) - 1] = 0;
++	snprintf(msg, n, "%s", got < sizeof(r) ? "no reply" : r.msg);
++	return got < sizeof(r) || r.h.type != AVD_RESULT ? -1000 : r.status;
++}
++
++/* MediaFormat COLOR_STANDARD / COLOR_TRANSFER / COLOR_RANGE / HDR_STATIC_INFO -> the helper's OPEN (ITU-T H.273) */
++static void hw_colour(const struct ATL_codec_context *ctx, struct avd_open2 *o)
++{
++	switch (ctx->hw_standard) {
++		case 1: o->primaries = 1, o->matrix = 1; break; /* BT709 */
++		case 2: o->primaries = 5, o->matrix = 5; break; /* BT601_PAL */
++		case 4: o->primaries = 6, o->matrix = 6; break; /* BT601_NTSC */
++		case 6: o->primaries = 9, o->matrix = 9; break; /* BT2020 */
++	}
++	switch (ctx->hw_transfer) {
++		case 1: o->transfer = 8; break;  /* LINEAR */
++		case 3: o->transfer = 1; break;  /* SDR_VIDEO */
++		case 6: o->transfer = 16; break; /* ST2084 (PQ, HDR10) */
++		case 7: o->transfer = 18; break; /* HLG */
++	}
++	o->full_range = ctx->hw_range == 1;
++	if (ctx->hw_hdr_len == 25 && ctx->hw_hdr[0] == 0) { /* type 0: ST 2086 + CTA-861.3, little-endian uint16 */
++		uint16_t v[12];
++		memcpy(v, ctx->hw_hdr + 1, sizeof(v));
++		for (int i = 0; i < 3; i++)
++			o->primaries_xy[i][0] = v[2 * i], o->primaries_xy[i][1] = v[2 * i + 1];
++		o->white_xy[0] = v[6], o->white_xy[1] = v[7];
++		o->max_luminance = v[8], o->min_luminance = v[9];
++		o->max_cll = v[10], o->max_fall = v[11];
++		o->has_mastering = v[8] || v[0] || v[6];
++		o->has_light_level = v[10] || v[11];
++	}
++}
++
+ /* configure: returns TRUE if the hardware path is used */
+ static gboolean hwdec_open(struct ATL_codec_context *ctx, const uint8_t *csd, size_t csd_len, SurfaceViewWidget *widget)
+ {
+@@ -231,8 +301,8 @@ static gboolean hwdec_open(struct ATL_codec_context *ctx, const uint8_t *csd, si
+ 	if (!gate || strcmp(gate, "1"))
+ 		return FALSE;
+ 	const char *name = ctx->codec->codec->name;
+-	gboolean hevc = !strcmp(name, "hevc");
+-	if (!hevc && strcmp(name, "h264"))
++	gboolean hevc = !strcmp(name, "hevc"), vp9 = !strcmp(name, "vp9");
++	if (!hevc && !vp9 && strcmp(name, "h264"))
+ 		return FALSE;
+ 	const char *path = getenv("ATL_HWDEC_SOCK");
+ 	if (!widget || !path || !*path) {
+@@ -248,32 +318,34 @@ static gboolean hwdec_open(struct ATL_codec_context *ctx, const uint8_t *csd, si
+ 			close(fd);
+ 		return FALSE;
+ 	}
+-	struct {
+-		struct avd_hdr h;
+-		uint32_t codec, width, height;
+-	} o = {{AVD_OPEN, 12, 0}, hevc ? 2 : 1, ctx->hw_width, ctx->hw_height};
+-	struct {
+-		struct avd_hdr h;
+-		int32_t status;
+-		char msg[60];
+-	} r = {0};
+-	size_t got = 0;
+-	if (hw_write_all(fd, &o, sizeof(o.h) + 12) == 0) { /* not sizeof(o): padded to 32 */
+-		gint64 end = g_get_monotonic_time() + 10000000; /* NDL load takes ~2 s on the TV */
+-		while (got < sizeof(r)) {
+-			int left = (int)((end - g_get_monotonic_time()) / 1000);
+-			struct pollfd p = {fd, POLLIN, 0};
+-			if (left <= 0 || poll(&p, 1, left) <= 0)
+-				break;
+-			ssize_t n = read(fd, (char *)&r + got, sizeof(r) - got);
+-			if (n <= 0)
+-				break;
+-			got += n;
++	char rmsg[64];
++	if (vp9) { /* only a protocol-2 helper whose decoder takes VP9 (an old one would load an H.264 decoder for it) */
++		struct avd_hdr hh = {AVD_HELLO, 0, 0};
++		int st = hw_write_all(fd, &hh, sizeof(hh)) ? -1000 : hw_result(fd, 300, rmsg, sizeof(rmsg));
++		if (st != 0 || !strstr(rmsg, " starfish ") || !strstr(rmsg, "vp9")) {
++			fprintf(stderr, "ATL_HWDEC: helper has no VP9 decoder (%s), using FFmpeg\n", st == -1000 ? "no reply: old helper" : rmsg);
++			close(fd);
++			return FALSE;
+ 		}
+ 	}
+-	if (got < sizeof(r) || r.h.type != AVD_RESULT || r.status != 0) {
+-		r.msg[sizeof(r.msg) - 1] = 0;
+-		fprintf(stderr, "ATL_HWDEC: helper OPEN failed (%s), using FFmpeg\n", got < sizeof(r) ? "no reply" : r.msg);
++	const char *ah = getenv("ATL_HWDEC_AHEAD");
++	struct {
++		struct avd_hdr h;
++		struct avd_open2 o;
++	} o;
++	memset(&o, 0, sizeof(o));
++	o.h.type = AVD_OPEN;
++	o.h.len = sizeof(o.o);
++	o.o.codec = hevc ? 2 : vp9 ? 3 : 1;
++	o.o.width = ctx->hw_width;
++	o.o.height = ctx->hw_height;
++	o.o.flags = ah && !strcmp(ah, "0") ? 0 : 1 /* AVD_OPEN_AHEAD */;
++	o.o.fps_milli = ctx->hw_fps_milli;
++	hw_colour(ctx, &o.o);
++	/* NDL load takes ~2 s on the TV */
++	int status = hw_write_all(fd, &o, sizeof(o)) ? -1000 : hw_result(fd, 10000, rmsg, sizeof(rmsg));
++	if (status != 0) {
++		fprintf(stderr, "ATL_HWDEC: helper OPEN failed (%s), using FFmpeg\n", rmsg);
+ 		close(fd);
+ 		return FALSE;
+ 	}
+@@ -282,6 +354,8 @@ static gboolean hwdec_open(struct ATL_codec_context *ctx, const uint8_t *csd, si
+ 	pthread_mutex_init(&hw->lock, NULL);
+ 	hw->fd = fd;
+ 	hw->hevc = hevc;
++	hw->vp9 = vp9;
++	hw->ahead = strstr(rmsg, " ahead") != NULL;
+ 	hw->debug = getenv("ATL_HWDEC_DEBUG") && !strcmp(getenv("ATL_HWDEC_DEBUG"), "1");
+ 	if (csd_len) {
+ 		hw->csd = malloc(csd_len);
+@@ -292,7 +366,8 @@ static gboolean hwdec_open(struct ATL_codec_context *ctx, const uint8_t *csd, si
+ 	hw->widget = g_object_ref(widget);
+ 	hw->last_area = -1000000000;
+ 	ctx->hw = hw;
+-	fprintf(stderr, "ATL_HWDEC: hardware decode active: %s %dx%d via %s\n", name, ctx->hw_width, ctx->hw_height, path);
++	fprintf(stderr, "ATL_HWDEC: hardware decode active: %s %dx%d %.3f fps via %s (%s: %s)\n", name, ctx->hw_width, ctx->hw_height,
++	        ctx->hw_fps_milli / 1000.0, path, hw->ahead ? "AUs at queue time" : "AUs at release time", rmsg);
+ 	hwdec_check_area(hw);
+ 	return TRUE;
+ }
+@@ -303,12 +378,14 @@ static int hwdec_queue(JNIEnv *env, struct hwdec *hw, jobject buffer, jlong pts)
+ 		hw->eos = TRUE;
+ 		return 0;
+ 	}
+-	if (hw->n_aus >= HW_MAX_AUS || hw->bytes > HW_MAX_BYTES)
++	if (hw->ahead ? hw->n_win >= HW_MAX_AUS + HW_WINDOW : (hw->n_aus >= HW_MAX_AUS || hw->bytes > HW_MAX_BYTES))
+ 		return 1; /* full: Java retries on the next dequeueInputBuffer */
+ 	jarray array_ref = NULL;
+ 	jbyte *array = NULL;
+ 	size_t len = get_nio_buffer_size(env, buffer);
+ 	uint8_t *data = get_nio_buffer(env, buffer, &array_ref, &array);
++	if (hw->vp9)
++		hw->need_csd = FALSE; /* VP9 codec-private data is not part of the frames */
+ 	size_t pre = (hw->need_csd ? hw->csd_len : 0) + hw->prefix_len;
+ 	uint8_t *au = malloc(pre + len + 1);
+ 	size_t off = 0;
+@@ -323,7 +400,7 @@ static int hwdec_queue(JNIEnv *env, struct hwdec *hw, jobject buffer, jlong pts)
+ 	if (len)
+ 		memcpy(au + off, data, len);
+ 	release_nio_buffer(env, array_ref, array);
+-	if (!hw_has_vcl(au + pre, len, hw->hevc)) { /* config only: goes in front of the next picture */
++	if (!hw->vp9 && !hw_has_vcl(au + pre, len, hw->hevc)) { /* config only: goes in front of the next picture */
+ 		free(hw->prefix);
+ 		hw->prefix = au;
+ 		hw->prefix_len = pre + len;
+@@ -338,8 +415,15 @@ static int hwdec_queue(JNIEnv *env, struct hwdec *hw, jobject buffer, jlong pts)
+ 		hw->cap_aus = hw->cap_aus ? hw->cap_aus * 2 : 32;
+ 		hw->aus = realloc(hw->aus, hw->cap_aus * sizeof(*hw->aus));
+ 	}
+-	hw->aus[hw->n_aus++] = (struct hw_au){au, pre + len, pts, hw->next_idx};
+-	hw->bytes += pre + len;
++	if (hw->ahead) { /* the helper's pipeline schedules it by pts */
++		hw_send(hw, AVD_FEED, au, pre + len, NULL, 0, pts);
++		if (hw->fed++ < 3 || hw->fed % 600 == 0)
++			fprintf(stderr, "ATL_HWDEC: fed AU #%lu ahead (%zu bytes, pts %" PRId64 ")\n", hw->fed, pre + len, (int64_t)pts);
++		free(au);
++	} else {
++		hw->aus[hw->n_aus++] = (struct hw_au){au, pre + len, pts, hw->next_idx};
++		hw->bytes += pre + len;
++	}
+ 	if (hw->n_win < (int)G_N_ELEMENTS(hw->win)) {
+ 		hw->win[hw->n_win].pts = pts;
+ 		hw->win[hw->n_win].idx = hw->next_idx;
+@@ -353,7 +437,7 @@ static jint hwdec_dequeue(JNIEnv *env, struct hwdec *hw, jobject buffer, jobject
+ {
+ 	jarray array_ref;
+ 	jbyte *array;
+-	int64_t token;
++	int64_t token, tok_pts = 0;
+ 	hwdec_check_area(hw);
+ 	if (hw->n_win > HW_WINDOW || (hw->eos && hw->n_win > 0)) {
+ 		int m = 0;
+@@ -361,6 +445,7 @@ static jint hwdec_dequeue(JNIEnv *env, struct hwdec *hw, jobject buffer, jobject
+ 			if (hw->win[i].pts < hw->win[m].pts)
+ 				m = i;
+ 		token = hw->win[m].idx;
++		tok_pts = hw->win[m].pts;
+ 		_SET_INT_FIELD(buffer_info, "flags", 0);
+ 		_SET_LONG_FIELD(buffer_info, "presentationTimeUs", hw->win[m].pts);
+ 		hw->win[m] = hw->win[--hw->n_win];
+@@ -374,6 +459,7 @@ static jint hwdec_dequeue(JNIEnv *env, struct hwdec *hw, jobject buffer, jobject
+ 	}
+ 	uint8_t *raw = get_nio_buffer(env, buffer, &array_ref, &array);
+ 	memcpy(raw, &token, sizeof(token));
++	memcpy(raw + 8, &tok_pts, sizeof(tok_pts)); /* output buffers are 8 KiB */
+ 	release_nio_buffer(env, array_ref, array);
+ 	_SET_INT_FIELD(buffer_info, "offset", 0);
+ 	_SET_INT_FIELD(buffer_info, "size", sizeof(token));
+@@ -388,6 +474,8 @@ static void hwdec_release(JNIEnv *env, struct hwdec *hw, jobject buffer, jboolea
+ 	int64_t token;
+ 	uint8_t *raw = get_nio_buffer(env, buffer, &array_ref, &array);
+ 	memcpy(&token, raw, sizeof(token));
++	int64_t tok_pts;
++	memcpy(&tok_pts, raw + 8, sizeof(tok_pts));
+ 	release_nio_buffer(env, array_ref, array);
+ 	int64_t due = render && release_ns > 0 ? release_ns : 0;
+ 	hw->n_rel++;
+@@ -406,6 +494,11 @@ static void hwdec_release(JNIEnv *env, struct hwdec *hw, jobject buffer, jboolea
+ 		hw->n_drop = hw->n_timed = 0;
+ 		hw->early_sum = hw->early_max = 0;
+ 	}
++	if (hw->ahead) {
++		if (token != INT64_MAX)
++			hw_send(hw, AVD_DUE, &due, sizeof(due), NULL, 0, tok_pts);
++		return;
++	}
+ 	if (hw->n_aus)
+ 		hw_send(hw, AVD_DUE, &due, sizeof(due), NULL, 0, 0);
+ 	int n = 0;
+@@ -460,6 +553,27 @@ static gboolean hwdec_retarget_idle(gpointer p)
+ 	return hwdec_area_idle(hw); /* drops the reference taken in setOutputSurface */
+ }
+ 
++JNIEXPORT void JNICALL Java_android_media_MediaCodec_native_1set_1video_1info(JNIEnv *env, jobject this, jlong codec, jint fps_milli,
++                                                                             jint standard, jint transfer, jint range, jobject hdr)
++{
++	struct ATL_codec_context *ctx = _PTR(codec);
++	ctx->hw_fps_milli = fps_milli > 0 ? fps_milli : 0;
++	ctx->hw_standard = standard;
++	ctx->hw_transfer = transfer;
++	ctx->hw_range = range;
++	ctx->hw_hdr_len = 0;
++	if (hdr && get_nio_buffer_size(env, hdr) >= 25) {
++		jarray array_ref;
++		jbyte *array;
++		uint8_t *p = get_nio_buffer(env, hdr, &array_ref, &array);
++		if (p) {
++			memcpy(ctx->hw_hdr, p, 25);
++			ctx->hw_hdr_len = 25;
++		}
++		release_nio_buffer(env, array_ref, array);
++	}
++}
++
+ JNIEXPORT void JNICALL Java_android_media_MediaCodec_native_1set_1output_1surface(JNIEnv *env, jobject this, jlong codec, jobject surface_obj)
+ {
+ 	struct ATL_codec_context *ctx = _PTR(codec);
+diff --git a/src/api-impl/android/media/MediaCodec.java b/src/api-impl/android/media/MediaCodec.java
+index 8c34b206..84197cff 100644
+--- a/src/api-impl/android/media/MediaCodec.java
++++ b/src/api-impl/android/media/MediaCodec.java
+@@ -65,6 +65,9 @@ public class MediaCodec {
+ 		} else if ("h264".equals(codecName) || "hevc".equals(codecName) || "vp8".equals(codecName) || "vp9".equals(codecName)) {
+ 			native_set_video_size(native_codec, format.containsKey("width") ? format.getInteger("width") : 0,
+ 			                      format.containsKey("height") ? format.getInteger("height") : 0);
++			native_set_video_info(native_codec, Math.round(number(format, "frame-rate") * 1000), (int)number(format, "color-standard"),
++			                      (int)number(format, "color-transfer"), (int)number(format, "color-range"),
++			                      format.containsKey("hdr-static-info") ? format.getByteBuffer("hdr-static-info") : null);
+ 			native_configure_video(native_codec, format.getByteBuffer("csd-0"), format.getByteBuffer("csd-1"), surface);
+ 		} else {
+ 			System.out.println("configure: format " + format + " not implemented");
+@@ -73,6 +76,15 @@ public class MediaCodec {
+ 		}
+ 	}
+ 
++	/* a numeric MediaFormat entry (apps set frame-rate as int or float), 0 when absent or not a number */
++	private static float number(MediaFormat format, String key) {
++		try {
++			return format.containsKey(key) ? format.getFloat(key) : 0;
++		} catch (ClassCastException | NullPointerException e) {
++			return 0;
++		}
++	}
++
+ 	public void start() {
+ 		System.out.println("MediaCodec.start(): codecName=" + codecName);
+ 		native_start(native_codec);
+@@ -225,6 +237,7 @@ public class MediaCodec {
+ 	private native void native_configure_audio(long codec, ByteBuffer extradata, int sampleRate, int channelCount);
+ 	private native void native_configure_video(long codec, ByteBuffer csd0, ByteBuffer csd1, Surface surface);
+ 	private native void native_set_video_size(long codec, int width, int height);
++	private native void native_set_video_info(long codec, int fpsMilli, int colorStandard, int colorTransfer, int colorRange, ByteBuffer hdrStaticInfo);
+ 	private native void native_set_output_surface(long codec, Surface surface);
+ 	private native void native_start(long codec);
+ 	private native int native_queueInputBuffer(long codec, ByteBuffer buffer, long presentationTimeUs);
+diff --git a/src/api-impl/android/media/MediaFormat.java b/src/api-impl/android/media/MediaFormat.java
+index dbceacda..ee88f3d9 100644
+--- a/src/api-impl/android/media/MediaFormat.java
++++ b/src/api-impl/android/media/MediaFormat.java
+@@ -28,6 +28,10 @@ public class MediaFormat {
+ 		return (ByteBuffer)map.get(name);
+ 	}
+ 
++	public float getFloat(String name) {
++		return ((Number)map.get(name)).floatValue();
++	}
++
+ 	public int getInteger(String name) {
+ 		return (int)map.get(name);
+ 	}
+-- 
+2.43.0
+

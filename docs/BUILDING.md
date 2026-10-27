@@ -70,6 +70,7 @@ release that already has it. Release versions must be numeric `x.y.z`, because w
 
 ```sh
 python3 tv/test_atld_memory.py      # atld memory policy, simulated (fake luna-send / SAM), no TV needed
+python3 native/atlvdec/sftest.py    # atlvdec Starfish backend against a stub pipeline: A/V sync, pause, seek (host gcc)
 python3 tv/apkinfo.py some.apk      # APK label / package / icon parser
 python3 tv/apkcheck.py some.apk --jar <runtime>/lib/java/dex/android_translation_layer/api-impl.jar
 ```

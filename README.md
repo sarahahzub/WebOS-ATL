@@ -72,7 +72,10 @@ images on its own (a new runtime waits until no Android app is running).
 - Google Play services (Google sign-in, Play Store, push notifications, most DRM). Apps that need them won't run.
 - WebView is limited: some pages or captchas inside apps stay blank.
 - Hardware video decoding (per app, or for all apps in Settings) works with some players. Others fall back to
-  software decoding, which is slow at 1080p.
+  software decoding, which is slow at 1080p. With a runtime that has patch 0043 (not released yet), H.264, HEVC
+  and VP9 go through LG's Starfish media pipeline. That is the one LG's own apps use: frames are shown at the
+  stream's frame rate, and HDR10/HLG metadata reaches the TV. Runtime 0.1.0 uses NDL in low-delay mode (see
+  [native/atlvdec/NOTES.md](native/atlvdec/NOTES.md)).
 - Chromium: the three-dot menu does not open, and full-screen video may close the browser.
 - Some dialogs don't show the check marks of their selected items.
 
