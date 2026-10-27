@@ -326,7 +326,46 @@ def stop(appid):
         except ProcessLookupError:
             pass
         p.wait()
+    kill_vdec(appid)
     log("stopped", appid, "peak_rss=%sMB" % peak if peak else "", meminfo())
+
+
+def vdec_pids(appid):
+    tag = ("/tmp/xdg/atlvdec-" + appid.replace(".", "-")).encode()
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            cmd = open(f"/proc/{d}/cmdline", "rb").read().split(b"\0")
+        except OSError:
+            continue
+        if len(cmd) > 1 and cmd[0].endswith(b"/atlvdec") and cmd[1] == tag:
+            out.append(int(d))
+    return out
+
+
+def kill_vdec(appid, grace=3.0):
+    """The wrapper (run.sh) sends TERM to its hardware-decode helper on close, but a helper stuck inside an NDL call
+    ignores it and keeps the TV's only video decoder (seen 2026-10-27: CloudStream closed, its atlvdec stayed, and
+    every other player then failed with "Fail to acquire SUB_SCALER resource"). atld (root) makes sure it ends."""
+    pids = vdec_pids(appid)
+    if not pids:
+        return
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    end = time.time() + grace
+    while time.time() < end and vdec_pids(appid):
+        time.sleep(0.2)
+    for pid in vdec_pids(appid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+            log("atlvdec", appid, "pid", pid, "did not exit on TERM: killed")
+        except (ProcessLookupError, PermissionError):
+            pass
 
 
 def start(appid, appdir, sock):

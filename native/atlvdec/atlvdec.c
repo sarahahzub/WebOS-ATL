@@ -786,10 +786,15 @@ static void feed_msg(void *buf, uint32_t len)
 	pq_run();
 }
 
+/* TERM/INT/HUP: leave the main loop and unload. If an NDL/Starfish call never returns (seen on the TV 2026-10-27:
+ * NDL_DirectMediaUnload hung in a FLUSH, the helper ignored the wrapper's TERM and kept the decoder, so the next
+ * player got "Fail to acquire SUB_SCALER resource"), SIGALRM's default action ends the process after 5 s and the
+ * media server frees the decoder of a dead client. */
 static void on_term(int s)
 {
 	(void)s;
 	quit = 1;
+	alarm(5);
 }
 
 int main(int argc, char **argv)
