@@ -24,7 +24,7 @@
 - **Codec re-create:** ExoPlayer re-creates the codec on a Surface change (SDK < 23) and waits only 2 s; a CLOSE keeps
   the decoder loaded `ATLVDEC_LINGER` s (default 3) and a same-codec/size OPEN reuses it (no ~2 s load).
 
-## Starfish backend (protocol 2, `sf.c`): written 2026-10-27, not yet run on the TV
+## Starfish backend (protocol 2, `sf.c`): written 2026-10-27, first TV run the same day (results below)
 
 **Why.** CSWeb (cloudstream-webos-native) plays through LG's StarfishMediaAPIs. Its playback is smooth, and the
 colours are right. ATL with NDL is laggy on the same TV. The two paths differ like this:
@@ -75,12 +75,30 @@ colours are right. ATL with NDL is laggy on the same TV. The two paths differ li
   - Load then stops at `LSRegisterPubPriv FAILED`, as NDL does without the luna role. The test binary wasn't at
     the role's exe path, and there is no media server in the container.
 
-**To check on the TV.**
-- Picture on the exported ATL window.
-- Whether a video-only pipeline without low-delay mode runs its clock (`ATLVDEC_SF_LOWDELAY=1` /
-  `ATLVDEC_SF_AUDIOSYNC=1` change the Load flags).
-- The sync error and holds in `vdec.log`: the `starfish: ... s:` lines every 10 s.
+**On the TV, 2026-10-27** (43UR7500, webOS 10.3.1; NewPipe, `https://www.youtube.com/watch?v=aqz-KE-bpKQ`,
+1280x720 H.264 60 fps, shown in NewPipe's 480x270 player; the screen was off, so the picture itself was not seen).
+Same video and layout with the release (NDL, runtime 0.1.0) and with this backend (runtime with patch 0043):
+
+| | NDL | Starfish |
+|---|---|---|
+| Run | 366 s, 19 350 AUs | 541 s, 30 640 AUs |
+| ExoPlayer drops (render=false) | 589 of 19 200 (3.1 %) | 19 of 30 600 (0.06 %) |
+| Decoder side | 139 feed gaps > 50 ms | sink 30 574 displayed, 34 dropped; 0 BufferFull, 0 errors |
+| Sync error vs ExoPlayer's due times | - | avg 6.9 ms (first 10 s 34.5 ms, then 6.4 ms); 5 of 51 windows had a max > 50 ms |
+| Helper HWM | 27 MB | 14 MB (decoding runs in LG's media process) |
+
+- Load took 752 ms. The video-only pipeline without low-delay ran its clock; `ATLVDEC_SF_LOWDELAY` and
+  `ATLVDEC_SF_AUDIOSYNC` were not needed.
+- The pipeline reported the stream as 1280x720 progressive at 59.94 fps (event 4).
+- 5 pauses from the app (buffering) were held and resumed without a resync.
+- Event 44 (about every 0.5-5 s) carries binary data; it was logged as text and is now logged as `(binary)`.
+- Memory, whole TV: both runs went to memchute level medium; only the NDL run hit low (once, ~25 s).
+- Raw logs: `sarahahzub/zips`, `tv-wip/tvtwin/build/results/tv-2026-10-27/`.
+
+**Still to check on the TV.**
+- The picture with the screen on (the capture service does not include the video plane).
 - Display-latency trim (`ATLVDEC_SF_SYNC_MS`).
 - HDR10 with `setHdrInfo`.
 - VP9.
+- Fullscreen playback and other apps (CloudStream).
 - `ATLVDEC_BACKEND=ndl` goes back to the old path.

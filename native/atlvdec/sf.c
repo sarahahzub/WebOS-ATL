@@ -233,7 +233,15 @@ static void on_event(int type, long long num, const char *str, void *ctx)
 		ev_eos = 1;
 	int refused = type == 18 && !ev_first_frame;
 	pthread_mutex_unlock(&mu);
-	LOG("event type=%d num=%lld %.300s%s", type, num, s, refused ? " (pipeline refused the stream)" : "");
+	/* some events (e.g. 44 on webOS 10, about every 0.5-5 s) carry a binary struct, not text: don't log the bytes */
+	int text = *s == '{' || *s == '[';  /* JSON may hold UTF-8 */
+	if (!text) {
+		const unsigned char *p = (const unsigned char *)s;
+		while (*p && (p - (const unsigned char *)s) < 300 && ((*p >= 0x20 && *p < 0x7f) || *p == '\n' || *p == '\t'))
+			p++;
+		text = !*p || (p - (const unsigned char *)s) >= 300;
+	}
+	LOG("event type=%d num=%lld %.300s%s", type, num, text ? s : "(binary)", refused ? " (pipeline refused the stream)" : "");
 }
 
 /* ------------------------------------------------------------------------------------------- state (main thread) */
